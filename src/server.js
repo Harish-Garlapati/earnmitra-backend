@@ -22,33 +22,15 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const allowedOrigins = [
-  'http://localhost:4200',
-  'http://localhost:4201',
-  'http://localhost:4202',
-  'http://localhost:4300',
-  'http://127.0.0.1:4200',
-  'http://127.0.0.1:4201',
-  'http://127.0.0.1:4202',
-  'http://localhost',
-  'capacitor://localhost',
-  'https://earnmitra.in',
-  'https://admin.earnmitra.in',
-  'https://api.earnmitra.in',
-  ...(process.env.ADMIN_CORS_ORIGINS ? process.env.ADMIN_CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean) : [])
-];
-// app.use(cors({
-//   origin: function(origin, callback) {
-//     if (!origin || allowedOrigins.includes(origin)) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error('Not allowed by CORS'));
-//     }
-//   },
-//   credentials: true
-// }));
-
-app.use(cors());
+// Allow CORS for any origin/URL while supporting credentials, preflight, and all headers
+const corsOptions = {
+  origin: true, // Dynamically reflects requesting origin to support any URL with credentials
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({
   verify: (req, res, buf) => {
