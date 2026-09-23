@@ -3,7 +3,7 @@ const http = require('http');
 
 function request(path, options, body = null) {
   return new Promise((resolve, reject) => {
-    const req = http.request(`http://localhost:3000${path}`, options, (res) => {
+    const req = http.request(`https://api.loancrm.org${path}`, options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }));
@@ -60,7 +60,7 @@ async function runTests() {
     console.log('Testing Partner isolation ...');
     const partner1Token = require('jsonwebtoken').sign({ id: 1, role: 'partner' }, 'earnmitra_super_secret_jwt_key_2026_secure');
     const partner2Token = require('jsonwebtoken').sign({ id: 2, role: 'partner' }, 'earnmitra_super_secret_jwt_key_2026_secure');
-    
+
     res = await request('/api/leads', { method: 'GET', headers: { 'Authorization': `Bearer ${partner1Token}` } });
     const p1Leads = res.body;
     res = await request('/api/leads', { method: 'GET', headers: { 'Authorization': `Bearer ${partner2Token}` } });

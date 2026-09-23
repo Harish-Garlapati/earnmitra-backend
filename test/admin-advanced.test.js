@@ -5,7 +5,7 @@ const JWT_SECRET = 'earnmitra_super_secret_jwt_key_2026_secure';
 
 function request(path, options = {}, body = null) {
   return new Promise((resolve, reject) => {
-    const req = http.request(`http://localhost:3000${path}`, options, (res) => {
+    const req = http.request(`https://api.loancrm.org${path}`, options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {

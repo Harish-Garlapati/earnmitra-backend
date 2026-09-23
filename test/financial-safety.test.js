@@ -8,7 +8,7 @@ const JWT_SECRET = 'earnmitra_super_secret_jwt_key_2026_secure';
 // Helper to make HTTP requests
 function request(path, options = {}, body = null) {
   return new Promise((resolve, reject) => {
-    const req = http.request(`http://localhost:3000${path}`, options, (res) => {
+    const req = http.request(`https://api.loancrm.org${path}`, options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -101,7 +101,7 @@ async function runFinancialSafetyTests() {
 
     // 4. Maker-Checker Payout Lifecycle
     console.log('\n─── Step 4: Maker-Checker Multi-Step Workflow ───');
-    
+
     // Step 4A: Maker moves to UNDER_REVIEW
     const reviewRes = await request(`/api/admin/payouts/${payoutDbId}/review`, { method: 'PATCH', headers: makerHeaders });
     assert(reviewRes.status === 200, 'Maker review succeeds');

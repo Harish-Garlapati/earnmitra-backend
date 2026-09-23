@@ -2,7 +2,7 @@
 const http = require('http');
 const jwt = require('jsonwebtoken');
 
-const BASE = 'http://localhost:3000';
+const BASE = 'https://api.loancrm.org';
 const JWT_SECRET = process.env.JWT_SECRET || 'earnmitra_super_secret_jwt_key_2026_secure';
 
 function request(path, options = {}, body = null) {

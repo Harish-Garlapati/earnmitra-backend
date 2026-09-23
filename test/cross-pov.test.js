@@ -4,7 +4,7 @@ const http = require('http');
 const jwt = require('jsonwebtoken');
 const { pool, query } = require('../src/config/db');
 
-const BASE = 'http://localhost:3000';
+const BASE = 'https://api.loancrm.org';
 const JWT_SECRET = process.env.JWT_SECRET || 'earnmitra_super_secret_jwt_key_2026_secure';
 
 function request(path, options = {}, body = null) {
@@ -57,7 +57,7 @@ async function cleanup(mobileA, mobileB) {
   try {
     const [partnersA] = await query('SELECT id FROM partners WHERE mobile = ?', [mobileA]);
     const [partnersB] = await query('SELECT id FROM partners WHERE mobile = ?', [mobileB]);
-    
+
     for (const p of [...partnersA, ...partnersB]) {
       await query('DELETE FROM lead_status_history WHERE lead_id IN (SELECT id FROM leads WHERE partner_id = ?)', [p.id]);
       await query('DELETE FROM leads WHERE partner_id = ?', [p.id]);
@@ -222,7 +222,7 @@ async function runTests() {
     // 12. Partner B still CANNOT see Lead A
     console.log('\n─── Step 12: Partner B still isolated ───');
     const bLeadDetailA = await request(`/api/leads/${leadACode}`, { method: 'GET', headers: partnerBHeaders });
-    assert('Partner B cannot view Lead A detail (403 or forbidden)', 
+    assert('Partner B cannot view Lead A detail (403 or forbidden)',
       bLeadDetailA.status === 403 || bLeadDetailA.body?.forbidden === true || bLeadDetailA.status === 404,
       `Status: ${bLeadDetailA.status}`
     );

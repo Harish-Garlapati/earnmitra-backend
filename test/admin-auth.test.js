@@ -3,7 +3,7 @@ const http = require('http');
 
 function request(path, options, body = null) {
   return new Promise((resolve, reject) => {
-    const req = http.request(`http://localhost:3000${path}`, options, (res) => {
+    const req = http.request(`https://api.loancrm.org${path}`, options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }));
@@ -73,7 +73,7 @@ async function runTests() {
     try {
       await pool.query('DELETE FROM admin_users WHERE email = ?', [testAdminEmail]);
       await pool.end();
-    } catch {}
+    } catch { }
   }
 }
 
