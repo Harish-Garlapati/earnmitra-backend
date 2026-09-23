@@ -1,6 +1,9 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'earnmitra_super_secret_jwt_key_2026_secure';
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET is required in production');
+}
+const JWT_SECRET = process.env.JWT_SECRET || 'earnmitra_test_only_jwt_secret';
 
 function authenticate(req, res, next) {
   const authHeader = req.headers['authorization'];

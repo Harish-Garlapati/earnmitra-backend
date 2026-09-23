@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const authService = require('../services/authService');
-const { authenticate, optionalAuth } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 const partnerService = require('../services/partnerService');
 const rateLimit = require('express-rate-limit');
 
@@ -12,8 +12,16 @@ const passwordResetLimiter = rateLimit({
   legacyHeaders: false
 });
 
+const otpSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: (process.env.NODE_ENV === 'test' || process.env.DEV_OTP_EXPOSE === 'true') ? 100 : 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many OTP requests. Please try again later.', code: 'OTP_RATE_LIMITED' }
+});
+
 // POST /api/auth/otp/send
-router.post('/otp/send', async (req, res, next) => {
+router.post('/otp/send', otpSendLimiter, async (req, res, next) => {
   try {
     const { mobile, purpose } = req.body;
     const result = await authService.sendOtp(mobile, purpose);
@@ -47,11 +55,11 @@ router.post('/password/reset', passwordResetLimiter, async (req, res, next) => {
 });
 
 // POST /api/auth/mpin/set
-router.post('/mpin/set', optionalAuth, async (req, res, next) => {
+router.post('/mpin/set', authenticate, async (req, res, next) => {
   try {
     const payload = {
       ...req.body,
-      partnerId: req.user?.id || req.body.partnerId
+      authenticatedPartnerId: req.user.id
     };
     const result = await authService.setMpin(payload);
     res.json(result);
@@ -96,9 +104,9 @@ router.post('/session/status', async (req, res, next) => {
 });
 
 // POST /api/auth/logout (Revoke trusted device session)
-router.post('/logout', optionalAuth, async (req, res, next) => {
+router.post('/logout', authenticate, async (req, res, next) => {
   try {
-    const partnerId = req.user?.id || req.body.partnerId;
+    const partnerId = req.user.id;
     const deviceId = req.body.deviceId;
     const result = await authService.logoutDevice(partnerId, deviceId);
     res.json(result);
@@ -111,8 +119,8 @@ router.post('/logout', optionalAuth, async (req, res, next) => {
 // POST /api/auth/login (password-based login)
 router.post('/login', async (req, res, next) => {
   try {
-    const { mobile, password } = req.body;
-    const result = await authService.loginWithPassword(mobile, password);
+    const { mobile, password, deviceId, deviceName, platform } = req.body;
+    const result = await authService.loginWithPassword(mobile, password, { deviceId, deviceName, platform });
     res.json(result);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

@@ -35,11 +35,14 @@ class PartnerService {
       kycStatus: partner.kyc_status,
       approvalStatus: partner.approval_status,
       profileImageUrl: partner.profile_image_path ? '/partners/me/profile-photo' : null,
+      joinedDate: partner.created_at || null,
+      referralCode: partner.partner_code || '',
       role: partner.role || 'partner'
     };
   }
 
-  async getCurrentPartner(idOrCode = 'P-1001') {
+  async getCurrentPartner(idOrCode = null) {
+    if (!idOrCode) return null;
     let row = null;
     if (typeof idOrCode === 'number' || /^\d+$/.test(String(idOrCode))) {
       row = await partnerRepo.findById(Number(idOrCode));
@@ -49,7 +52,10 @@ class PartnerService {
     return this.formatPartner(row);
   }
 
-  async getSummary(partnerIdOrCode = 'P-1001') {
+  async getSummary(partnerIdOrCode = null) {
+    if (!partnerIdOrCode) {
+      return { earnings: { total: 0, paid: 0, available: 0, thisMonth: 0 }, counts: { submitted: 0, disbursed: 0, inProgress: 0, rejected: 0 } };
+    }
     let partner = null;
     if (typeof partnerIdOrCode === 'number' || /^\d+$/.test(String(partnerIdOrCode))) {
       partner = await partnerRepo.findById(Number(partnerIdOrCode));

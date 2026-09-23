@@ -4,10 +4,10 @@ class PayoutRepository {
   async getEarningsSummary(partnerId) {
     const [rows] = await query(
       `SELECT 
-        SUM(CASE WHEN earning_type != 'tds' THEN amount ELSE 0 END) AS total,
-        SUM(CASE WHEN status = 'paid' AND earning_type != 'tds' THEN amount ELSE 0 END) AS paid,
-        SUM(CASE WHEN status = 'available' THEN amount ELSE 0 END) AS available,
-        SUM(CASE WHEN MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE()) AND earning_type != 'tds' THEN amount ELSE 0 END) AS thisMonth
+        SUM(CASE WHEN earning_type NOT IN ('tds','payout') THEN amount ELSE 0 END) AS total,
+        SUM(CASE WHEN status = 'paid' AND earning_type NOT IN ('tds','payout') THEN amount ELSE 0 END) AS paid,
+        SUM(CASE WHEN status = 'available' OR (earning_type = 'payout' AND status = 'pending') THEN amount ELSE 0 END) AS available,
+        SUM(CASE WHEN MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE()) AND earning_type NOT IN ('tds','payout') THEN amount ELSE 0 END) AS thisMonth
        FROM partner_earnings
        WHERE partner_id = ?`,
       [partnerId]
@@ -71,7 +71,7 @@ class PayoutRepository {
 
       // Check current available balance
       const [rows] = await conn.query(
-        `SELECT SUM(CASE WHEN status = 'available' THEN amount ELSE 0 END) AS available
+        `SELECT SUM(CASE WHEN status = 'available' OR (earning_type = 'payout' AND status = 'pending') THEN amount ELSE 0 END) AS available
          FROM partner_earnings
          WHERE partner_id = ? FOR UPDATE`,
         [partnerId]
@@ -95,6 +95,16 @@ class PayoutRepository {
          VALUES (?, ?, 'payout', 'pending', ?)`,
         [partnerId, -amount, `Payout request ${refNumber}`]
       );
+
+      // Reserve from partner_wallets earned_balance (strictly earned funds only)
+      const walletRepo = require('./walletRepository');
+      await walletRepo.debitPayout({
+        partnerId,
+        amount,
+        referenceId: refNumber,
+        description: `Payout request ${refNumber}`,
+        conn
+      });
 
       await conn.commit();
 
@@ -130,7 +140,15 @@ class PayoutRepository {
         year: 'numeric'
       }),
       amount: Number(r.amount),
-      status: r.status === 'completed' ? 'Paid' : 'Pending'
+      status: ({
+        requested: 'Pending',
+        pending: 'Pending',
+        processing: 'Processing',
+        completed: 'Paid',
+        paid: 'Paid',
+        rejected: 'Rejected',
+        failed: 'Failed'
+      })[String(r.status || '').toLowerCase()] || 'Pending'
     }));
   }
 }

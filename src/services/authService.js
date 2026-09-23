@@ -4,9 +4,35 @@ const jwt = require('jsonwebtoken');
 const { query, pool } = require('../config/db');
 const partnerRepo = require('../repositories/partnerRepository');
 const partnerService = require('./partnerService');
+const smsService = require('./smsService');
 const { JWT_SECRET } = require('../middleware/authMiddleware');
 
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const OTP_PURPOSES = new Set(['signup', 'login', 'password_reset', 'device_verification', 'pin_reset']);
+
+function normalizeIndianMobile(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('91')) digits = digits.slice(2);
+  if (!/^[6-9]\d{9}$/.test(digits)) {
+    const err = new Error('Valid Indian mobile number required');
+    err.status = 400;
+    err.code = 'INVALID_MOBILE';
+    throw err;
+  }
+  return digits;
+}
+
+function normalizePurpose(value) {
+  const aliases = { register: 'signup', registration: 'signup', mpin_reset: 'pin_reset' };
+  const purpose = aliases[String(value || '').trim().toLowerCase()] || String(value || '').trim().toLowerCase();
+  if (!OTP_PURPOSES.has(purpose)) {
+    const err = new Error('Unsupported OTP purpose');
+    err.status = 400;
+    err.code = 'INVALID_OTP_PURPOSE';
+    throw err;
+  }
+  return purpose;
+}
 
 class AuthService {
   generateToken(payload) {
@@ -14,37 +40,66 @@ class AuthService {
   }
 
   async sendOtp(mobile, purpose = 'login') {
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
-    if (!cleanMobile || cleanMobile.length !== 10) {
-      const err = new Error('Valid 10-digit mobile number required');
-      err.status = 400;
+    const cleanMobile = normalizeIndianMobile(mobile);
+    const cleanPurpose = normalizePurpose(purpose);
+
+    const [recent] = await query(
+      `SELECT created_at FROM otp_sessions WHERE mobile = ? AND purpose = ?
+       ORDER BY created_at DESC LIMIT 1`,
+      [cleanMobile, cleanPurpose]
+    );
+    if (recent[0] && Date.now() - new Date(recent[0].created_at).getTime() < 30000) {
+      const err = new Error('Please wait before requesting another OTP.');
+      err.status = 429;
+      err.code = 'OTP_RESEND_THROTTLED';
       throw err;
     }
 
-    // Generate random 6-digit OTP
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const otp = String(crypto.randomInt(100000, 1000000));
     const otpHash = await bcrypt.hash(otp, 8);
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes (600 seconds) matching DLT template
 
-    await query(
+    const [inserted] = await query(
       `INSERT INTO otp_sessions (mobile, otp_hash, purpose, expires_at, attempt_count, is_consumed)
        VALUES (?, ?, ?, ?, 0, 0)`,
-      [cleanMobile, otpHash, purpose, expiresAt]
+      [cleanMobile, otpHash, cleanPurpose, expiresAt]
     );
 
-    const devExpose = process.env.DEV_OTP_EXPOSE === 'true' || process.env.NODE_ENV !== 'production';
+    let delivery = null;
+    if (smsService.isConfigured()) {
+      try {
+        delivery = await smsService.sendOtp(cleanMobile, otp);
+      } catch (error) {
+        await query('UPDATE otp_sessions SET is_consumed = 1 WHERE id = ?', [inserted.insertId]);
+        const safeErr = new Error('Unable to send OTP right now. Please try again.');
+        safeErr.status = error.status || 502;
+        safeErr.code = error.code || 'SMS_DELIVERY_FAILED';
+        throw safeErr;
+      }
+    }
 
-    return {
+    const devExpose = (process.env.DEV_OTP_EXPOSE === 'true' || process.env.NODE_ENV === 'test') && process.env.NODE_ENV !== 'production';
+
+    const response = {
       success: true,
       mobile: cleanMobile,
-      expiresInSeconds: 300,
-      devOtp: devExpose ? otp : undefined,
+      expiresInSeconds: 600,
+      resendCooldownSeconds: 30,
+      deliveryStatus: delivery ? delivery.status : 'unconfigured',
+      provider: delivery ? delivery.provider : null,
       message: 'OTP sent successfully'
     };
+
+    if (devExpose) {
+      response.devOtp = otp;
+    }
+
+    return response;
   }
 
   async verifyOtp(mobile, otp, purpose = 'login', deviceId = null, deviceName = null, platform = null) {
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
+    const cleanMobile = normalizeIndianMobile(mobile);
+    const cleanPurpose = normalizePurpose(purpose);
     const cleanOtp = String(otp || '').trim();
 
     if (!cleanMobile || !cleanOtp) {
@@ -53,13 +108,13 @@ class AuthService {
       throw err;
     }
 
-    // Find latest active OTP session matching purpose if specified
+    // Purpose is an exact security boundary: one flow's OTP cannot authorize another.
     const [sessions] = await query(
       `SELECT * FROM otp_sessions 
        WHERE mobile = ? AND is_consumed = 0 AND expires_at > NOW()
-         AND (purpose = ? OR purpose IS NULL OR ? = 'login')
+         AND purpose = ?
        ORDER BY created_at DESC LIMIT 1`,
-      [cleanMobile, purpose, purpose]
+      [cleanMobile, cleanPurpose]
     );
 
     if (sessions.length === 0) {
@@ -119,7 +174,7 @@ class AuthService {
       };
     } else {
       // New user registering
-      const tempToken = jwt.sign({ mobile: cleanMobile, purpose: 'register' }, JWT_SECRET, { expiresIn: '1h' });
+      const tempToken = jwt.sign({ mobile: cleanMobile, purpose: 'signup' }, JWT_SECRET, { expiresIn: '1h' });
       return {
         success: true,
         isNew: true,
@@ -130,8 +185,8 @@ class AuthService {
     }
   }
 
-  async loginWithPassword(mobile, password) {
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
+  async loginWithPassword(mobile, password, device = {}) {
+    const cleanMobile = normalizeIndianMobile(mobile);
     if (!cleanMobile || !password) {
       const err = new Error('Mobile and password are required');
       err.status = 400;
@@ -165,41 +220,53 @@ class AuthService {
       mobile: partner.mobile
     });
 
+    let devSession = null;
+    if (device && device.deviceId) {
+      devSession = await this.createDeviceSession(
+        partner.id,
+        device.deviceId,
+        device.deviceName || 'Mobile Device',
+        device.platform || 'android'
+      );
+    }
+
     return {
       success: true,
       token,
+      deviceId: devSession?.deviceId,
+      deviceToken: devSession?.deviceToken,
+      hasMpin: !!partner.mpin_hash,
       partner: partnerService.formatPartner(partner)
     };
   }
 
   async requestPasswordResetOtp(mobile) {
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
-    if (cleanMobile.length !== 10) {
-      const err = new Error('Valid 10-digit mobile number required');
-      err.status = 400;
-      throw err;
-    }
+    const cleanMobile = normalizeIndianMobile(mobile);
     const partner = await partnerRepo.findByMobile(cleanMobile);
     let devOtp;
     if (partner) {
       const sent = await this.sendOtp(cleanMobile, 'password_reset');
       devOtp = sent?.devOtp;
     }
-    return {
+    const devExpose = (process.env.DEV_OTP_EXPOSE === 'true' || process.env.NODE_ENV === 'test') && process.env.NODE_ENV !== 'production';
+    const response = {
       success: true,
       mobile: cleanMobile,
       expiresInSeconds: 300,
-      devOtp,
       message: 'If this mobile is registered, a password reset OTP has been sent.'
     };
+    if (devExpose && devOtp) {
+      response.devOtp = devOtp;
+    }
+    return response;
   }
 
   async resetPassword(payload) {
-    const cleanMobile = String(payload.mobile || '').replace(/\D/g, '').slice(-10);
+    const cleanMobile = normalizeIndianMobile(payload.mobile);
     const cleanOtp = String(payload.otp || '').trim();
     const password = String(payload.newPassword || '');
     const confirmPassword = String(payload.confirmPassword || '');
-    if (cleanMobile.length !== 10 || !/^\d{6}$/.test(cleanOtp)) {
+    if (!cleanMobile || !/^\d{6}$/.test(cleanOtp)) {
       const err = new Error('Valid mobile number and 6-digit OTP are required'); err.status = 400; throw err;
     }
     if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
@@ -259,12 +326,29 @@ class AuthService {
       city,
       district,
       state = 'Telangana',
-      pan
+      pan,
+      verificationToken
     } = payload;
 
     const resolvedName = fullName || name;
-    const resolvedType = partnerType || type;
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
+    const resolvedType = partnerType || type || 'Individual';
+    const cleanMobile = normalizeIndianMobile(mobile);
+
+    if (verificationToken) {
+      let verifiedMobile = '';
+      try {
+        const decoded = jwt.verify(String(verificationToken), JWT_SECRET);
+        if (decoded.purpose === 'signup' || decoded.purpose === 'register') {
+          verifiedMobile = normalizeIndianMobile(decoded.mobile);
+        }
+      } catch { /* invalid token */ }
+      if (!verifiedMobile || verifiedMobile !== cleanMobile) {
+        const err = new Error('Verified signup session required. Please verify the mobile OTP again.');
+        err.status = 401;
+        err.code = 'SIGNUP_VERIFICATION_REQUIRED';
+        throw err;
+      }
+    }
 
     if (!resolvedName || !cleanMobile || !resolvedType) {
       const err = new Error('Full name, mobile and partner type are required');
@@ -272,8 +356,8 @@ class AuthService {
       throw err;
     }
 
-    if (cleanMobile.length !== 10) {
-      const err = new Error('Please enter a valid 10-digit mobile number');
+    if (!password || password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+      const err = new Error('Password must be at least 8 characters and include uppercase, lowercase and a number');
       err.status = 400;
       throw err;
     }
@@ -287,13 +371,7 @@ class AuthService {
     }
 
     const partnerCode = await this.getNextPartnerCode();
-    let passwordHash = null;
-    if (password) {
-      passwordHash = await bcrypt.hash(password, 10);
-    } else {
-      // Default initial password if none provided
-      passwordHash = await bcrypt.hash('Partner@123', 10);
-    }
+    const passwordHash = await bcrypt.hash(password, 10);
 
     const insertSql = `
       INSERT INTO partners (
@@ -435,7 +513,7 @@ class AuthService {
   }
 
   async setMpin(payload) {
-    const partnerId = payload.partnerId;
+    const partnerId = payload.authenticatedPartnerId;
     const deviceId = payload.deviceId || payload.deviceUuid;
     const deviceToken = payload.deviceToken || payload.trustedDeviceToken;
     const cleanMpin = String(payload.mpin || payload.pin || '').trim();
@@ -443,13 +521,13 @@ class AuthService {
     const tempToken = payload.tempToken;
 
     if (!cleanMpin || !/^\d{4}$/.test(cleanMpin)) {
-      const err = new Error('MPIN must be exactly 4 numeric digits');
+      const err = new Error('PIN must be exactly 4 numeric digits');
       err.status = 400;
       throw err;
     }
 
     if (cleanMpin !== cleanConfirm) {
-      const err = new Error('MPIN and Confirm MPIN do not match');
+      const err = new Error('PIN and confirmation do not match');
       err.status = 400;
       throw err;
     }
@@ -516,7 +594,7 @@ class AuthService {
 
     return {
       success: true,
-      message: 'MPIN configured successfully',
+      message: 'PIN configured successfully',
       token,
       deviceId: devSession.deviceId,
       deviceToken: devSession.deviceToken,
@@ -531,7 +609,7 @@ class AuthService {
     const deviceToken = payload.deviceToken || payload.trustedDeviceToken;
 
     if (!cleanMpin || !/^\d{4}$/.test(cleanMpin)) {
-      const err = new Error('Incorrect MPIN');
+      const err = new Error('Incorrect PIN');
       err.status = 400;
       throw err;
     }
@@ -552,14 +630,14 @@ class AuthService {
 
     // 2. Brute force lockout check
     if (deviceSession.mpin_locked_until && new Date(deviceSession.mpin_locked_until) > new Date()) {
-      const err = new Error('Account temporarily locked due to too many incorrect MPIN attempts. Please reset using Forgot MPIN.');
+      const err = new Error('Account temporarily locked due to too many incorrect PIN attempts. Please use Forgot PIN.');
       err.status = 423;
       throw err;
     }
 
     // 3. Ensure MPIN is configured
     if (!deviceSession.mpin_hash) {
-      const err = new Error('MPIN not configured for this account. Please set an MPIN.');
+      const err = new Error('PIN not configured for this account. Please create a PIN.');
       err.status = 400;
       throw err;
     }
@@ -573,7 +651,7 @@ class AuthService {
           'UPDATE partners SET mpin_attempts = ?, mpin_locked_until = DATE_ADD(NOW(), INTERVAL 15 MINUTE) WHERE id = ?',
           [attempts, deviceSession.partner_id]
         );
-        const err = new Error('Incorrect MPIN. Maximum 5 attempts reached. Account locked for 15 minutes.');
+        const err = new Error('Incorrect PIN. Maximum 5 attempts reached. Account locked for 15 minutes.');
         err.status = 423;
         throw err;
       } else {
@@ -581,7 +659,7 @@ class AuthService {
           'UPDATE partners SET mpin_attempts = ? WHERE id = ?',
           [attempts, deviceSession.partner_id]
         );
-        const err = new Error('Incorrect MPIN');
+        const err = new Error('Incorrect PIN');
         err.status = 401;
         throw err;
       }
@@ -616,19 +694,19 @@ class AuthService {
 
   async resetMpin(payload) {
     const { mobile, otp, newMpin, confirmMpin, deviceId, deviceName, platform } = payload;
-    const cleanMobile = String(mobile || '').replace(/\D/g, '').slice(-10);
+    const cleanMobile = normalizeIndianMobile(mobile);
     const cleanOtp = String(otp || '').trim();
     const cleanNewMpin = String(newMpin || '').trim();
     const cleanConfirm = String(confirmMpin || '').trim();
 
     if (!cleanNewMpin || !/^\d{4}$/.test(cleanNewMpin)) {
-      const err = new Error('MPIN must be exactly 4 numeric digits');
+      const err = new Error('PIN must be exactly 4 numeric digits');
       err.status = 400;
       throw err;
     }
 
     if (cleanNewMpin !== cleanConfirm) {
-      const err = new Error('New MPIN and Confirm MPIN do not match');
+      const err = new Error('New PIN and confirmation do not match');
       err.status = 400;
       throw err;
     }
@@ -637,7 +715,7 @@ class AuthService {
     const [sessions] = await query(
       `SELECT * FROM otp_sessions 
        WHERE mobile = ? AND is_consumed = 0 AND expires_at > NOW()
-         AND (purpose = 'mpin_reset' OR purpose = 'login')
+         AND purpose = 'pin_reset'
        ORDER BY created_at DESC LIMIT 1`,
       [cleanMobile]
     );
@@ -649,6 +727,11 @@ class AuthService {
     }
 
     const session = sessions[0];
+    if (session.attempt_count >= 5) {
+      const err = new Error('Too many invalid attempts. Please request a new OTP.');
+      err.status = 429;
+      throw err;
+    }
     const isMatch = await bcrypt.compare(cleanOtp, session.otp_hash);
     if (!isMatch) {
       await query('UPDATE otp_sessions SET attempt_count = attempt_count + 1 WHERE id = ?', [session.id]);
@@ -694,7 +777,7 @@ class AuthService {
 
     return {
       success: true,
-      message: 'MPIN reset successfully',
+      message: 'PIN reset successfully',
       token,
       deviceId: devSession.deviceId,
       deviceToken: devSession.deviceToken,
@@ -732,3 +815,5 @@ class AuthService {
 }
 
 module.exports = new AuthService();
+module.exports.normalizeIndianMobile = normalizeIndianMobile;
+module.exports.normalizePurpose = normalizePurpose;

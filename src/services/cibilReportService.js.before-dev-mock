@@ -100,16 +100,6 @@ async function downloadPdf(rawUrl) {
   return { fullPath, mimeType: 'application/pdf' };
 }
 
-function isDevBureauMockEnabled() {
-  const isMock = String(process.env.DEV_BUREAU_MOCK || '').toLowerCase() === 'true';
-  const isProd = process.env.NODE_ENV === 'production';
-  if (isMock && isProd) {
-    console.error('[SECURITY ERROR] DEV_BUREAU_MOCK is set to true in production environment! Refusing mock mode. Safe fallback to real providers.');
-    return false;
-  }
-  return isMock;
-}
-
 async function fetchNewReport(partnerId, body, requestMeta = {}) {
   const input = validateInput(body);
   const bureau = input.bureau;
@@ -121,25 +111,21 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
     consentTextVersion: 'earnmitra-cibil-v1'
   }, requestMeta.ip);
 
-  const mockActive = isDevBureauMockEnabled();
-
-  // 2. Validate provider is actively configured (bypassed in safe development mock mode)
-  if (!mockActive) {
-    if (bureau === 'CIBIL') {
-      if (!surepassProvider.isConfigured('CIBIL')) {
-        await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.', 503, 'NOT_CALLED');
-        throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.');
-      }
-    } else if (bureau === 'CRIF') {
-      if (!surepassProvider.isConfigured('CRIF') && !verifyalProvider.isConfigured()) {
-        await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', 'No active CRIF provider is configured.', 503, 'NOT_CALLED');
-        throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'No active CRIF provider is configured.');
-      }
-    } else if (bureau === 'EXPERIAN' || bureau === 'EQUIFAX') {
-      if (!verifyalProvider.isConfigured()) {
-        await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', `No active provider is configured for ${bureau}.`, 503, 'NOT_CALLED');
-        throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', `No active provider is configured for ${bureau}.`);
-      }
+  // 2. Validate provider is actively configured
+  if (bureau === 'CIBIL') {
+    if (!surepassProvider.isConfigured('CIBIL')) {
+      await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.', 503, 'NOT_CALLED');
+      throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.');
+    }
+  } else if (bureau === 'CRIF') {
+    if (!surepassProvider.isConfigured('CRIF') && !verifyalProvider.isConfigured()) {
+      await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', 'No active CRIF provider is configured.', 503, 'NOT_CALLED');
+      throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'No active CRIF provider is configured.');
+    }
+  } else if (bureau === 'EXPERIAN' || bureau === 'EQUIFAX') {
+    if (!verifyalProvider.isConfigured()) {
+      await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', `No active provider is configured for ${bureau}.`, 503, 'NOT_CALLED');
+      throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', `No active provider is configured for ${bureau}.`);
     }
   }
 
@@ -164,75 +150,28 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
     throw walletErr;
   }
 
-  // 5. Call appropriate bureau provider (or Safe Development Mock Interception)
+  // 5. Call appropriate bureau provider
+  const activeProvider = (bureau === 'EXPERIAN' || bureau === 'EQUIFAX' || (bureau === 'CRIF' && !surepassProvider.isConfigured('CRIF')))
+    ? verifyalProvider
+    : surepassProvider;
+
   let providerResult = null;
   let providerError = null;
 
-  if (mockActive) {
-    console.log(`[cibilReportService] SAFE DEVELOPMENT MOCK active for ${bureau}. Zero external calls dispatched.`);
-
-    const mockScores = {
-      CIBIL: 720,
-      EXPERIAN: 735,
-      EQUIFAX: 710,
-      CRIF: 745
-    };
-    const mockScore = mockScores[bureau] || 720;
-
-    providerResult = {
-      success: true,
-      status: 200,
-      bureau,
-      provider: 'MOCK',
-      clientId: `DEV-MOCK-${bureau}-${Date.now()}`,
-      creditScore: mockScore,
-      reportUrl: null,
-      customerName: input.name,
-      mobile: input.mobile,
-      pan: input.pan,
-      isMock: true,
-      testMode: true,
-      normalizedData: {
-        score: mockScore,
-        bureau,
-        scoreCategory: 'TEST DATA',
-        paymentHistory: 'TEST DATA',
-        creditUtilization: 'TEST DATA',
-        creditAge: 'TEST DATA',
-        totalAccounts: 5,
-        recentEnquiries: 2,
-        writtenOff: 0,
-        settled: 0,
-        isMock: true,
-        testMode: true,
-        reportDate: new Date().toISOString()
-      },
-      raw: {
-        mock: true,
-        bureau,
-        notice: 'Development test report — not a real credit bureau report.'
+  try {
+    if (bureau === 'CIBIL') {
+      providerResult = await surepassProvider.fetchCibilReport(input);
+    } else if (bureau === 'CRIF') {
+      if (surepassProvider.isConfigured('CRIF')) {
+        providerResult = await surepassProvider.fetchCrifReport(input);
+      } else {
+        providerResult = await verifyalProvider.fetchReport({ ...input, bureau: 'crif' });
       }
-    };
-  } else {
-    const activeProvider = (bureau === 'EXPERIAN' || bureau === 'EQUIFAX' || (bureau === 'CRIF' && !surepassProvider.isConfigured('CRIF')))
-      ? verifyalProvider
-      : surepassProvider;
-
-    try {
-      if (bureau === 'CIBIL') {
-        providerResult = await surepassProvider.fetchCibilReport(input);
-      } else if (bureau === 'CRIF') {
-        if (surepassProvider.isConfigured('CRIF')) {
-          providerResult = await surepassProvider.fetchCrifReport(input);
-        } else {
-          providerResult = await verifyalProvider.fetchReport({ ...input, bureau: 'crif' });
-        }
-      } else if (bureau === 'EXPERIAN' || bureau === 'EQUIFAX') {
-        providerResult = await verifyalProvider.fetchReport(input);
-      }
-    } catch (callErr) {
-      providerError = callErr;
+    } else if (bureau === 'EXPERIAN' || bureau === 'EQUIFAX') {
+      providerResult = await verifyalProvider.fetchReport(input);
     }
+  } catch (callErr) {
+    providerError = callErr;
   }
 
   // 6. Evaluate Billing Outcome
@@ -255,7 +194,6 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
     // Mark success
     await repo.markSuccess(id, partnerId, {
       clientId: providerResult.clientId,
-      provider: providerResult.provider || null,
       creditScore: providerResult.creditScore,
       storagePath: downloaded.fullPath,
       mimeType: downloaded.mimeType,
@@ -265,8 +203,7 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
 
     await audit.log(partnerId, 'cibil.fetch_succeeded', 'cibil_report', id, {
       bureau,
-      creditScore: providerResult.creditScore,
-      isMock: Boolean(providerResult.isMock)
+      creditScore: providerResult.creditScore
     }, requestMeta.ip);
 
     await notificationService.createNotification(
@@ -335,4 +272,4 @@ function safeReportPath(storedPath) {
   return resolved;
 }
 
-module.exports = { ApiError, validateInput, fetchNewReport, safeReportPath, isDevBureauMockEnabled, REPORT_ROOT };
+module.exports = { ApiError, validateInput, fetchNewReport, safeReportPath, REPORT_ROOT };

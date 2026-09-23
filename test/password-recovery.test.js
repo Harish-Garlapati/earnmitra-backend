@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const bcrypt = require('bcryptjs');
+process.env.DEV_OTP_EXPOSE = 'true';
+const smsService = require('../src/services/smsService');
+smsService.sendOtp = async () => ({ success: true, requestId: 'TEST-REQ' });
 const authService = require('../src/services/authService');
 const { query, pool } = require('../src/config/db');
 

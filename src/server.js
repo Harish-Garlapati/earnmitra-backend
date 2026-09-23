@@ -13,6 +13,9 @@ const adminRoutes = require('./routes/admin');
 const uploadRoutes = require('./routes/uploads');
 const cibilReportRoutes = require('./routes/cibilReports');
 const profilePhotoRoutes = require('./routes/profilePhoto');
+const notificationRoutes = require('./routes/notifications');
+const walletRoutes = require('./routes/wallet');
+const webhookRoutes = require('./routes/webhooks');
 
 const rateLimit = require('express-rate-limit');
 
@@ -29,7 +32,10 @@ const allowedOrigins = [
   'http://127.0.0.1:4202',
   'http://localhost',
   'capacitor://localhost',
-  ...(process.env.ADMIN_CORS_ORIGINS ? process.env.ADMIN_CORS_ORIGINS.split(',') : [])
+  'https://earnmitra.in',
+  'https://admin.earnmitra.in',
+  'https://api.earnmitra.in',
+  ...(process.env.ADMIN_CORS_ORIGINS ? process.env.ADMIN_CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean) : [])
 ];
 // app.use(cors({
 //   origin: function(origin, callback) {
@@ -44,7 +50,11 @@ const allowedOrigins = [
 
 app.use(cors());
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf ? buf.toString('utf8') : '';
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 
 const adminLoginLimiter = rateLimit({
@@ -58,7 +68,10 @@ app.use('/api/auth/admin/login', adminLoginLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/partners', partnerRoutes);
 app.use('/api/partners/me/profile-photo', profilePhotoRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/webhooks', webhookRoutes);
 app.use('/api/cibil-reports', cibilReportRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/leads', leadRoutes);
 app.use('/api/payouts', payoutRoutes);
 app.use('/api/support', supportRoutes);
