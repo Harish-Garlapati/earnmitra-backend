@@ -2,14 +2,11 @@ const express = require('express');
 const router = express.Router();
 const partnerService = require('../services/partnerService');
 const leadService = require('../services/leadService');
-const { optionalAuth, authenticate } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 
 // Helper to determine active partner ID or code
 function getActivePartnerIdentifier(req) {
-  if (req.user && req.user.partnerId) {
-    return req.user.partnerId;
-  }
-  return 'P-1001';
+  return req.user.partnerId;
 }
 
 // GET /api/partners/me (and alias /api/partners/current)
@@ -25,8 +22,8 @@ const getMe = async (req, res, next) => {
     next(err);
   }
 };
-router.get('/me', optionalAuth, getMe);
-router.get('/current', optionalAuth, getMe);
+router.get('/me', authenticate, getMe);
+router.get('/current', authenticate, getMe);
 
 // Canonical partner summary endpoint:
 // GET /api/partners/me/summary (and alias /api/partners/current/summary)
@@ -39,11 +36,11 @@ const getSummary = async (req, res, next) => {
     next(err);
   }
 };
-router.get('/me/summary', optionalAuth, getSummary);
-router.get('/current/summary', optionalAuth, getSummary);
+router.get('/me/summary', authenticate, getSummary);
+router.get('/current/summary', authenticate, getSummary);
 
 // GET /api/partners/me/dashboard (full dashboard data: partner + earnings + counts + recent leads from MariaDB)
-router.get(['/me/dashboard', '/current/dashboard'], optionalAuth, async (req, res, next) => {
+router.get(['/me/dashboard', '/current/dashboard'], authenticate, async (req, res, next) => {
   try {
     const identifier = getActivePartnerIdentifier(req);
     const partner = await partnerService.getCurrentPartner(identifier);
@@ -63,16 +60,7 @@ router.get(['/me/dashboard', '/current/dashboard'], optionalAuth, async (req, re
 
 // POST /api/partners/register
 router.post('/register', async (req, res, next) => {
-  try {
-    const { name, mobile, type, state } = req.body;
-    if (!name || !mobile || !type || !state) {
-      return res.status(400).json({ error: 'name, mobile, type and state are required' });
-    }
-    const created = await partnerService.registerPartner(req.body);
-    res.status(201).json({ partner: created });
-  } catch (err) {
-    next(err);
-  }
+  res.status(410).json({ error: 'Use the verified signup flow at /api/auth/register.' });
 });
 
 // GET /api/partners/meta  (dropdown options for registration + lead forms)

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const partnerService = require('../services/partnerService');
 const { query } = require('../config/db');
-const { optionalAuth } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 
 // GET /api/support/faqs?q=payout
 router.get('/faqs', async (req, res, next) => {
@@ -15,9 +15,9 @@ router.get('/faqs', async (req, res, next) => {
 });
 
 // GET /api/support/tickets — list partner's tickets
-router.get('/tickets', optionalAuth, async (req, res, next) => {
+router.get('/tickets', authenticate, async (req, res, next) => {
   try {
-    const partnerId = req.user ? (req.user.partnerId || req.user.id) : 1;
+    const partnerId = req.user.partnerId;
     const [rows] = await query(
       `SELECT * FROM support_tickets 
        WHERE partner_id = ? 
@@ -31,7 +31,7 @@ router.get('/tickets', optionalAuth, async (req, res, next) => {
 });
 
 // POST /api/support/tickets — raise a new ticket
-router.post('/tickets', optionalAuth, async (req, res, next) => {
+router.post('/tickets', authenticate, async (req, res, next) => {
   try {
     const { subject, department = 'Operations', description, category, leadId, priority = 'Normal' } = req.body;
 
@@ -39,7 +39,7 @@ router.post('/tickets', optionalAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'Subject is required' });
     }
 
-    let partnerId = req.user ? (req.user.partnerId || req.user.id) : (req.body.partnerId || 1);
+    const partnerId = req.user.partnerId;
     let partnerName = 'Earnmitra Partner';
 
     if (partnerId) {

@@ -1,7 +1,7 @@
 const { query, pool } = require('../config/db');
 
 class LeadRepository {
-  async findAll({ partnerId, status } = {}) {
+  async findAll({ partnerId, status, limit = 50, offset = 0 } = {}) {
     let sql = 'SELECT * FROM leads WHERE 1=1';
     const params = [];
 
@@ -19,7 +19,12 @@ class LeadRepository {
       }
     }
 
-    sql += ' ORDER BY created_at DESC';
+    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(safeLimit, safeOffset);
+
     const [rows] = await query(sql, params);
     return rows;
   }

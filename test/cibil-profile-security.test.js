@@ -32,21 +32,32 @@ test('CIBIL validation, masking, persistence ownership, and profile photo access
   let photoPath = '';
 
   t.after(async () => {
+    if (typeof server.closeAllConnections === 'function') {
+      server.closeAllConnections();
+    }
     await new Promise(resolve => server.close(resolve));
     const [rows] = await query('SELECT profile_image_path FROM partners WHERE id = ?', [partnerA]);
     photoPath = rows[0]?.profile_image_path || photoPath;
     await query('DELETE FROM partner_audit_logs WHERE partner_id IN (?,?)', [partnerA, partnerB]);
     await query('DELETE FROM partner_cibil_reports WHERE partner_id IN (?,?)', [partnerA, partnerB]);
+    await query('DELETE FROM partner_wallet_transactions WHERE partner_id IN (?,?)', [partnerA, partnerB]);
+    await query('DELETE FROM partner_wallets WHERE partner_id IN (?,?)', [partnerA, partnerB]);
     await query('DELETE FROM partners WHERE id IN (?,?)', [partnerA, partnerB]);
     if (photoPath) await fs.unlink(photoPath).catch(() => {});
     await pool.end();
   });
 
+  const walletRepo = require('../src/repositories/walletRepository');
+  await walletRepo.creditWallet({ partnerId: partnerA, amount: 500, description: 'Test', referenceId: 'FUND_A' });
+
+  const previousMock = process.env.DEV_BUREAU_MOCK;
   const previousUrl = process.env.SUREPASS_CIBIL_API_URL;
   const previousKey = process.env.SUREPASS_CIBIL_API_KEY;
+  process.env.DEV_BUREAU_MOCK = 'false';
   delete process.env.SUREPASS_CIBIL_API_URL; delete process.env.SUREPASS_CIBIL_API_KEY;
   const create = await fetch(`${base}/cibil-reports`, { method:'POST', headers:headersA, body:JSON.stringify({ name:'Synthetic Customer', mobile:'9999999999', pan:'ABCDE1234F', gender:'male', consent:true }) });
   process.env.SUREPASS_CIBIL_API_URL = previousUrl; process.env.SUREPASS_CIBIL_API_KEY = previousKey;
+  process.env.DEV_BUREAU_MOCK = previousMock;
   assert.equal(create.status, 503);
   assert.equal((await create.json()).code, 'PROVIDER_NOT_CONFIGURED');
 

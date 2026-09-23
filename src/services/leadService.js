@@ -110,14 +110,26 @@ class LeadService {
     };
   }
 
-  async listLeads({ status, partnerId, partnerCode } = {}) {
+  async listLeads({ status, partnerId, partnerCode, limit = 50, offset = 0, page } = {}) {
     let resolvedPartnerId = partnerId;
     if (!resolvedPartnerId && partnerCode) {
       const p = await partnerRepo.findByCode(partnerCode);
       if (p) resolvedPartnerId = p.id;
     }
 
-    const leads = await leadRepo.findAll({ partnerId: resolvedPartnerId, status });
+    let calculatedOffset = offset;
+    if (page && !offset) {
+      const parsedPage = Math.max(1, parseInt(page, 10) || 1);
+      const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+      calculatedOffset = (parsedPage - 1) * parsedLimit;
+    }
+
+    const leads = await leadRepo.findAll({
+      partnerId: resolvedPartnerId,
+      status,
+      limit,
+      offset: calculatedOffset
+    });
     return leads.map(l => this.formatLead(l, []));
   }
 
@@ -126,8 +138,8 @@ class LeadService {
     if (!lead) return null;
 
     // Strict multi-user isolation check
-    if (role !== 'admin' && partnerId !== null && lead.partner_id !== partnerId) {
-      return { forbidden: true };
+    if (role !== 'admin') {
+      if (!partnerId || lead.partner_id !== partnerId) return { forbidden: true };
     }
 
     const [history, ccDetails, insDetails] = await Promise.all([
@@ -143,19 +155,7 @@ class LeadService {
   }
 
   async createLead(payload, activePartnerId = null) {
-    let resolvedPartnerId = activePartnerId;
-    if (!resolvedPartnerId) {
-      if (payload.partnerId) {
-        const p = await partnerRepo.findById(payload.partnerId);
-        if (p) resolvedPartnerId = p.id;
-      } else if (payload.partnerCode) {
-        const p = await partnerRepo.findByCode(payload.partnerCode);
-        if (p) resolvedPartnerId = p.id;
-      } else {
-        const p = await partnerRepo.findByCode('P-1001');
-        if (p) resolvedPartnerId = p.id;
-      }
-    }
+    const resolvedPartnerId = activePartnerId;
 
     if (!resolvedPartnerId) {
       const err = new Error('Valid partner ID is required to create a lead');

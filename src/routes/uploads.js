@@ -4,7 +4,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { query } = require('../config/db');
-const { optionalAuth } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
+const leadService = require('../services/leadService');
 
 const UPLOAD_BASE = path.join(__dirname, '../../uploads');
 const KYC_DIR = path.join(UPLOAD_BASE, 'kyc');
@@ -44,14 +45,19 @@ const upload = multer({
 });
 
 // POST /api/uploads/kyc — upload partner KYC document
-router.post('/kyc', optionalAuth, upload.single('file'), async (req, res, next) => {
+router.post('/kyc', authenticate, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const partnerId = req.user ? req.user.partnerId : 1;
+    const partnerId = req.user.partnerId;
     const docType = req.body.docType || 'id_proof';
+    const allowedDocTypes = new Set(['pan_card', 'aadhaar_card', 'address_proof', 'selfie']);
+    if (!allowedDocTypes.has(docType)) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'Unsupported KYC document type' });
+    }
 
     const [result] = await query(
       `INSERT INTO kyc_documents (partner_id, doc_type, file_path, original_filename, mime_type, file_size, status)
@@ -81,13 +87,21 @@ router.post('/kyc', optionalAuth, upload.single('file'), async (req, res, next) 
 });
 
 // POST /api/uploads/lead/:leadId — upload lead supporting document
-router.post('/lead/:leadId', optionalAuth, upload.single('file'), async (req, res, next) => {
+router.post('/lead/:leadId', authenticate, async (req, res, next) => {
+  try {
+    const lead = await leadService.getLeadById(req.params.leadId, req.user.partnerId, 'partner');
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (lead.forbidden) return res.status(403).json({ error: 'Access denied: You do not own this lead record' });
+    req.ownedLeadId = lead.dbId;
+    next();
+  } catch (error) { next(error); }
+}, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const leadId = req.params.leadId;
+    const leadId = req.ownedLeadId;
     const docType = req.body.documentType || req.body.docType || 'supporting_doc';
 
     const [result] = await query(

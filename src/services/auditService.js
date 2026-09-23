@@ -13,6 +13,10 @@ class AuditService {
     }
   }
 
+  async logAction(adminId, action, entityType = null, entityId = null, metadata = null, ipAddress = null) {
+    return this.log(adminId, action, entityType, entityId, metadata, ipAddress);
+  }
+
   async getAll({ page = 1, limit = 25, action, entityType, adminId, dateFrom, dateTo } = {}) {
     let sql = `SELECT al.*, au.username, au.email as admin_email
                FROM audit_logs al

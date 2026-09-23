@@ -38,7 +38,7 @@ class AdminRepository {
     return rows;
   }
 
-  async getDashboardStats() {
+  async getDashboardStats(category = null) {
     const [partners] = await query(`
       SELECT
         COUNT(*) as total_partners,
@@ -46,6 +46,14 @@ class AdminRepository {
         SUM(CASE WHEN kyc_status = 'pending' THEN 1 ELSE 0 END) as pending_kyc
       FROM partners
     `);
+
+    let leadWhere = 'WHERE 1=1';
+    const leadParams = [];
+    if (category && category !== 'All') {
+      leadWhere += ' AND product_category = ?';
+      leadParams.push(category);
+    }
+
     const [leads] = await query(`
       SELECT
         COUNT(*) as total_leads,
@@ -65,7 +73,8 @@ class AdminRepository {
         END), 0) as disbursed_amount,
         SUM(CASE WHEN status != 'In Progress' AND current_stage != 'Lead submitted' THEN 1 ELSE 0 END) as total_applications
       FROM leads
-    `);
+      ${leadWhere}
+    `, leadParams);
     const [payouts] = await query(`
       SELECT
         COUNT(*) as total_payouts,

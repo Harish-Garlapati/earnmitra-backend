@@ -9,8 +9,9 @@
     "dev": "node --watch src/server.js",
     "db:init": "node src/db/migrate.js",
     "db:migrate:v6": "node src/db/migrate_v6_cibil_profile.js",
+    "db:migrate:v8": "node src/db/migrate_v8_bureau_wallet.js",
     "db:seed": "node src/db/seed.js",
-    "test": "node test/cross-pov.test.js && node test/admin-auth.test.js && node test/admin-kyc.test.js && node test/admin-leads.test.js && node test/admin-advanced.test.js && node test/e2e-sync-verification.test.js && node test/financial-safety.test.js && node --test test/cibil-profile-security.test.js && node --test test/password-recovery.test.js"
+    "test": "node test/cross-pov.test.js && node test/admin-auth.test.js && node test/admin-kyc.test.js && node test/admin-leads.test.js && node test/admin-advanced.test.js && node test/e2e-sync-verification.test.js && node test/financial-safety.test.js && node --test test/cibil-profile-security.test.js && node --test test/password-recovery.test.js && node --test test/phase1-production-integrity.test.js && node --test test/bureau-providers.test.js && node --test test/wallet-cashfree.test.js && node --test test/unified-wallet.test.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

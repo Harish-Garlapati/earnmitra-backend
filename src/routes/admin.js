@@ -9,6 +9,9 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const cibilReportRepo = require('../repositories/cibilReportRepository');
+const notificationService = require('../services/notificationService');
+const partnerRepo = require('../repositories/partnerRepository');
+const walletRepo = require('../repositories/walletRepository');
 
 router.use(authenticate, requireAdmin);
 
@@ -24,10 +27,31 @@ router.get('/cibil-reports/:id', requirePermission('reports.view'), async (req, 
   } catch (error) { next(error); }
 });
 
+// Partner Wallets Oversight
+router.get('/wallets', requirePermission('partners.view', 'reports.view'), async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const wallets = await walletRepo.listAllWalletsForAdmin({ limit, offset });
+    res.json({ success: true, data: wallets, limit, offset });
+  } catch (error) { next(error); }
+});
+
+router.get('/wallet-transactions', requirePermission('partners.view', 'reports.view'), async (req, res, next) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const partnerId = req.query.partnerId ? parseInt(req.query.partnerId, 10) : undefined;
+    const transactions = await walletRepo.listAllTransactionsForAdmin({ partnerId, limit, offset });
+    res.json({ success: true, data: transactions, limit, offset });
+  } catch (error) { next(error); }
+});
+
+
 // Dashboard
 router.get('/dashboard/stats', requirePermission('dashboard.view'), async (req, res, next) => {
   try {
-    const stats = await adminRepo.getDashboardStats();
+    const stats = await adminRepo.getDashboardStats(req.query.productCategory);
     res.json(stats);
   } catch (err) {
     next(err);
@@ -75,7 +99,14 @@ router.get('/leads', requirePermission('leads.view'), async (req, res, next) => 
 router.post('/leads', requirePermission('leads.view'), async (req, res, next) => {
   try {
     const leadService = require('../services/leadService');
-    const newLead = await leadService.createLead(req.body, req.body.partnerId || null);
+    let partnerId = req.body.partnerId;
+    if (!partnerId) {
+      const [firstPartner] = await query('SELECT id FROM partners WHERE is_active = 1 ORDER BY id ASC LIMIT 1');
+      if (firstPartner && firstPartner.length > 0) {
+        partnerId = firstPartner[0].id;
+      }
+    }
+    const newLead = await leadService.createLead(req.body, partnerId);
     await auditService.logAction(
       req.user.adminId || req.user.id,
       'lead.create',
@@ -95,12 +126,35 @@ router.get('/leads/:id', requirePermission('leads.view'), async (req, res, next)
   try {
     const leadService = require('../services/leadService');
     const partnerRepo = require('../repositories/partnerRepository');
+    const commissionService = require('../services/commissionService');
     const lead = await leadService.getLeadById(req.params.id, null, 'admin');
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const partner = lead.partnerId ? await partnerRepo.findById(lead.partnerId) : null;
+    const realDbId = lead.dbId || lead.id;
+
+    // Fetch any existing credited commission from partner_earnings
+    const [earningsRows] = await query(
+      `SELECT * FROM partner_earnings WHERE lead_id = ? ORDER BY id DESC LIMIT 1`,
+      [realDbId]
+    );
+
+    // Fetch recommended commission based on active rules
+    let recommendedCommission = null;
+    if (partner) {
+      const rule = await commissionService.resolveRule(
+        lead.loanType || lead.productCategory,
+        partner.partner_type
+      );
+      if (rule) {
+        recommendedCommission = commissionService.calculate(rule, lead.amount);
+      }
+    }
+
     res.json({
       ...lead,
+      commission: earningsRows[0] || null,
+      recommendedCommission,
       partner: partner ? {
         id: partner.id,
         code: partner.partner_code,
@@ -109,6 +163,83 @@ router.get('/leads/:id', requirePermission('leads.view'), async (req, res, next)
         email: partner.email,
         type: partner.partner_type
       } : null
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Super Admin Decides / Sets Commission for a Specific Lead
+router.post('/leads/:id/commission', requirePermission('commissions.view'), async (req, res, next) => {
+  try {
+    const { amount, rate, tdsRate, description, customBasis } = req.body;
+    if (amount === undefined || amount === null || isNaN(Number(amount)) || Number(amount) < 0) {
+      return res.status(400).json({ error: 'Valid commission amount is required' });
+    }
+
+    const [leadRows] = await query('SELECT * FROM leads WHERE id = ? OR lead_code = ?', [req.params.id, req.params.id]);
+    if (leadRows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+    const lead = leadRows[0];
+    if (!lead.partner_id) {
+      return res.status(400).json({ error: 'Lead does not have an associated sourcing partner' });
+    }
+
+    const gross = Math.round(Number(amount) * 100) / 100;
+    const tds = (tdsRate !== undefined && !isNaN(Number(tdsRate))) ? Number(tdsRate) : 0;
+    const tdsAmount = tds > 0 ? Math.round(((gross * tds) / 100) * 100) / 100 : 0;
+    const net = Math.max(0, Math.round((gross - tdsAmount) * 100) / 100);
+
+    const desc = description || `Admin-decided commission for Lead ${lead.lead_code || lead.id} (${customBasis || `Gross: ₹${gross.toLocaleString('en-IN')}${tds > 0 ? `, TDS: ${tds}%` : ''}`})`;
+
+    // Check if commission already exists for this lead
+    const [existing] = await query('SELECT * FROM partner_earnings WHERE lead_id = ? AND earning_type = "lead_commission"', [lead.id]);
+
+    let earningsId = null;
+    if (existing.length > 0) {
+      await query(
+        'UPDATE partner_earnings SET amount = ?, description = ?, status = "available", updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [net, desc, existing[0].id]
+      );
+      earningsId = existing[0].id;
+    } else {
+      const [insertRes] = await query(
+        'INSERT INTO partner_earnings (partner_id, lead_id, amount, earning_type, status, description) VALUES (?, ?, ?, "lead_commission", "available", ?)',
+        [lead.partner_id, lead.id, net, desc]
+      );
+      earningsId = insertRes.insertId;
+    }
+
+    await walletRepo.creditCommission({
+      partnerId: lead.partner_id,
+      amount: net,
+      earningId: earningsId,
+      description: desc,
+      leadId: lead.id
+    });
+
+    await auditService.log(req.user.adminId, 'commission.admin_decided', 'partner_earnings', String(earningsId), {
+      leadId: lead.id,
+      partnerId: lead.partner_id,
+      grossAmount: gross,
+      tdsRate: tds,
+      tdsAmount,
+      netCommission: net,
+      description: desc
+    });
+
+    res.json({
+      success: true,
+      message: `Commission of ₹${net.toLocaleString('en-IN')} decided and credited to partner wallet`,
+      commission: {
+        id: earningsId,
+        leadId: lead.id,
+        partnerId: lead.partner_id,
+        grossAmount: gross,
+        tdsAmount,
+        netAmount: net,
+        description: desc,
+        status: 'available'
+      }
     });
   } catch (err) {
     next(err);
@@ -158,6 +289,7 @@ router.patch('/leads/:id/status', requirePermission('leads.update_status'), asyn
     }
 
     await auditService.log(req.user.adminId, 'lead.update_status', 'lead', String(realId), { old_status: leadRecord.status, new_status: status, stage: finalStage });
+    notificationService.notifyLeadStatus(leadRecord.partner_id, leadRecord.lead_code || `Lead #${realId}`, status, finalStage).catch(() => {});
 
     // Dynamic Commission Rule Resolution on Business Milestone (No hardcoded values)
     let commissionResult = null;
@@ -188,6 +320,47 @@ router.patch('/leads/:id/status', requirePermission('leads.update_status'), asyn
 });
 
 // Partners
+router.post('/partners', requirePermission('partners.edit'), async (req, res, next) => {
+  try {
+    const { full_name, mobile, email, partner_type, district, city, state } = req.body;
+    if (!full_name || !mobile) {
+      return res.status(400).json({ error: 'Partner full name and mobile are required' });
+    }
+    const cleanMob = String(mobile).replace(/\D/g, '');
+    if (cleanMob.length !== 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number' });
+    }
+    const code = 'P' + Math.floor(100000 + Math.random() * 900000);
+    const created = await partnerRepo.create({
+      partner_code: code,
+      full_name: full_name.trim(),
+      mobile: cleanMob,
+      email: email ? email.trim() : null,
+      partner_type: partner_type || 'DSA',
+      business_name: full_name.trim(),
+      city: city || 'Hyderabad',
+      district: district || 'Hyderabad',
+      state: state || 'Telangana',
+      kyc_status: 'pending',
+      approval_status: 'approved'
+    });
+
+    try {
+      await auditService.log({
+        adminId: req.user?.id || 1,
+        action: 'PARTNER_CREATED',
+        entityType: 'partner',
+        entityId: String(created.id),
+        metadata: { partnerCode: code, fullName: full_name.trim() }
+      });
+    } catch (_) {}
+
+    res.status(201).json({ success: true, partnerId: created.id, partnerCode: code });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/partners', requirePermission('partners.view'), async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -327,6 +500,7 @@ router.patch('/kyc/:id', requirePermission('partners.review_kyc'), async (req, r
     }
 
     await auditService.log(req.user.adminId, 'kyc.review', 'kyc_document', String(req.params.id), { new_status: status, note: note || null, partner_id: partnerId });
+    notificationService.notifyKycStatus(partnerId, status, note).catch(() => {});
     res.json({ success: true, message: 'KYC document status updated' });
   } catch (err) {
     next(err);
@@ -463,6 +637,7 @@ router.patch('/payouts/:id/approve', requirePermission('payouts.approve'), async
       new_status: 'APPROVED',
       approved_by: req.user.adminId
     });
+    notificationService.notifyPayoutStatus(payout.partner_id, payout.id, 'APPROVED').catch(() => {});
 
     const [updated] = await query(
       'SELECT pr.*, p.partner_code, p.full_name as partner_name FROM payout_requests pr LEFT JOIN partners p ON pr.partner_id = p.id WHERE pr.id = ?',
@@ -547,6 +722,7 @@ router.patch('/payouts/:id/settle', requirePermission('payouts.approve'), async 
       utr_number: utrNumber,
       amount: payout.amount
     });
+    notificationService.notifyPayoutStatus(payout.partner_id, payout.id, 'PAID', utrNumber).catch(() => {});
 
     const [updated] = await query(
       'SELECT pr.*, p.partner_code, p.full_name as partner_name FROM payout_requests pr LEFT JOIN partners p ON pr.partner_id = p.id WHERE pr.id = ?',
@@ -592,6 +768,14 @@ router.patch('/payouts/:id/reject', requirePermission('payouts.approve'), async 
          VALUES (?, ?, 'refund', 'available', ?)`,
         [payout.partner_id, payout.amount, `Refund for rejected payout #${payout.reference_number}: ${reason}`]
       );
+      // Restore wallet earned_balance atomically
+      await walletRepo.refundPayout({
+        partnerId: payout.partner_id,
+        amount: payout.amount,
+        referenceId: payout.reference_number,
+        reason: `Refund for rejected payout #${payout.reference_number}: ${reason}`,
+        conn
+      });
       await conn.commit();
     } catch (txErr) {
       await conn.rollback();
@@ -606,6 +790,7 @@ router.patch('/payouts/:id/reject', requirePermission('payouts.approve'), async 
       reason,
       refunded_amount: payout.amount
     });
+    notificationService.notifyPayoutStatus(payout.partner_id, payout.id, 'REJECTED').catch(() => {});
 
     const [updated] = await query(
       'SELECT pr.*, p.partner_code, p.full_name as partner_name FROM payout_requests pr LEFT JOIN partners p ON pr.partner_id = p.id WHERE pr.id = ?',
@@ -736,6 +921,66 @@ router.get('/commissions', requirePermission('commissions.view'), async (req, re
       limit,
       totalPages: Math.ceil(countRows[0].total / limit),
       summary: summaryRows[0] || { totalEarned: 0, totalPaid: 0, totalPending: 0 }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Super Admin Directly Awards / Adjusts Commission for Any Partner
+router.post('/commissions/award', requirePermission('commissions.view'), async (req, res, next) => {
+  try {
+    const { partnerId, leadId, amount, tdsRate, description } = req.body;
+    if (!partnerId || amount === undefined || isNaN(Number(amount)) || Number(amount) <= 0) {
+      return res.status(400).json({ error: 'Valid partnerId and positive amount are required' });
+    }
+
+    const [partnerRows] = await query('SELECT * FROM partners WHERE id = ? OR partner_code = ?', [partnerId, partnerId]);
+    if (partnerRows.length === 0) return res.status(404).json({ error: 'Partner not found' });
+    const partner = partnerRows[0];
+
+    const gross = Math.round(Number(amount) * 100) / 100;
+    const tds = (tdsRate !== undefined && !isNaN(Number(tdsRate))) ? Number(tdsRate) : 0;
+    const tdsAmount = tds > 0 ? Math.round(((gross * tds) / 100) * 100) / 100 : 0;
+    const net = Math.max(0, Math.round((gross - tdsAmount) * 100) / 100);
+
+    const desc = description || `Direct Commission / Incentive Award by Admin`;
+
+    const [insertRes] = await query(
+      'INSERT INTO partner_earnings (partner_id, lead_id, amount, earning_type, status, description) VALUES (?, ?, ?, "lead_commission", "available", ?)',
+      [partner.id, leadId || null, net, desc]
+    );
+
+    await walletRepo.creditCommission({
+      partnerId: partner.id,
+      amount: net,
+      earningId: insertRes.insertId,
+      description: desc,
+      leadId: leadId || null
+    });
+
+    await auditService.log(req.user.adminId, 'commission.admin_awarded', 'partner_earnings', String(insertRes.insertId), {
+      partnerId: partner.id,
+      leadId: leadId || null,
+      grossAmount: gross,
+      tdsRate: tds,
+      tdsAmount,
+      netCommission: net,
+      description: desc
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Commission of ₹${net.toLocaleString('en-IN')} awarded to ${partner.full_name} (${partner.partner_code})`,
+      earnings: {
+        id: insertRes.insertId,
+        partnerId: partner.id,
+        partnerCode: partner.partner_code,
+        partnerName: partner.full_name,
+        netAmount: net,
+        status: 'available',
+        description: desc
+      }
     });
   } catch (err) {
     next(err);
@@ -1144,6 +1389,9 @@ router.patch('/support/tickets/:id', async (req, res, next) => {
     );
     await auditService.log(req.user?.adminId || 1, 'ticket.update', 'support_ticket', String(req.params.id), { status, resolution_note });
     const [rows] = await query(`SELECT * FROM support_tickets WHERE ${whereClause}`, [req.params.id]);
+    if (rows[0] && rows[0].partner_id) {
+      notificationService.notifySupportReply(rows[0].partner_id, rows[0].id, rows[0].subject).catch(() => {});
+    }
     res.json({ success: true, message: 'Ticket updated', ticket: rows[0] || null });
   } catch (err) {
     next(err);

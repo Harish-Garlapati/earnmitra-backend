@@ -63,6 +63,9 @@ async function runFinancialSafetyTests() {
     await pool.query(
       "INSERT INTO partner_earnings (partner_id, amount, earning_type, status, description) VALUES (1, 10000, 'commission', 'available', 'Test Credit for Financial Safety Test')"
     );
+    await pool.query(
+      "UPDATE partner_wallets SET balance = balance + 10000, earned_balance = earned_balance + 10000 WHERE partner_id = 1"
+    );
 
     // Get current balance
     const balRes = await request('/api/payouts', { method: 'GET', headers: partnerHeaders });

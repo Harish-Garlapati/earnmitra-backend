@@ -153,7 +153,26 @@ class CommissionService {
         [lead.partner_db_id, lead.id, calc.netAmount, description]
       );
 
+      // Atomically credit partner wallet earned_balance (idempotent via earning ID)
+      const walletRepo = require('../repositories/walletRepository');
+      await walletRepo.creditCommission({
+        partnerId: lead.partner_db_id,
+        amount: calc.netAmount,
+        earningId: earnRes.insertId,
+        description: `Commission: ${lead.loan_type || lead.product_category} (${lead.lead_code || 'Lead #' + lead.id})`,
+        leadId: lead.id,
+        conn
+      });
+
       await conn.commit();
+
+      const notificationService = require('./notificationService');
+      notificationService.notifyCommission(
+        lead.partner_db_id,
+        lead.lead_code || `Lead #${lead.id}`,
+        calc.netAmount,
+        calc.basis
+      ).catch(() => {});
 
       if (adminId) {
         await auditService.log(

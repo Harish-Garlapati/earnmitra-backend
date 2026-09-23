@@ -2,7 +2,7 @@ const payoutRepo = require('../repositories/payoutRepository');
 const partnerRepo = require('../repositories/partnerRepository');
 
 class PayoutService {
-  async getPayoutData(partnerIdOrCode = 'P-1001') {
+  async getPayoutData(partnerIdOrCode = null) {
     let partner = null;
     if (typeof partnerIdOrCode === 'number' || /^\d+$/.test(String(partnerIdOrCode))) {
       partner = await partnerRepo.findById(Number(partnerIdOrCode));
@@ -35,7 +35,7 @@ class PayoutService {
     };
   }
 
-  async requestPayout(amount, bank, partnerIdOrCode = 'P-1001') {
+  async requestPayout(amount, bank, partnerIdOrCode = null) {
     let partner = null;
     if (typeof partnerIdOrCode === 'number' || /^\d+$/.test(String(partnerIdOrCode))) {
       partner = await partnerRepo.findById(Number(partnerIdOrCode));
@@ -58,6 +58,14 @@ class PayoutService {
     const amt = Number(amount);
     if (!amt || amt <= 0) {
       const err = new Error('amount must be greater than 0');
+      err.status = 400;
+      throw err;
+    }
+
+    const walletService = require('./walletService');
+    const wallet = await walletService.getWallet(partner.id);
+    if (amt > wallet.earnedBalance) {
+      const err = new Error('Requested payout amount exceeds available balance (withdrawable earned balance)');
       err.status = 400;
       throw err;
     }

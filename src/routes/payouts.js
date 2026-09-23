@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const payoutService = require('../services/payoutService');
-const { optionalAuth } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 
 // GET /api/payouts — balances + transaction history from MariaDB
-router.get('/', optionalAuth, async (req, res, next) => {
+router.get('/', authenticate, async (req, res, next) => {
   try {
-    const partnerId = req.user ? req.user.partnerId : 1;
+    const partnerId = req.user.partnerId;
     const data = await payoutService.getPayoutData(partnerId);
     res.json(data);
   } catch (err) {
@@ -15,9 +15,9 @@ router.get('/', optionalAuth, async (req, res, next) => {
 });
 
 // POST /api/payouts — request a payout
-router.post('/', optionalAuth, async (req, res, next) => {
+router.post('/', authenticate, async (req, res, next) => {
   try {
-    const partnerId = req.user ? req.user.partnerId : 1;
+    const partnerId = req.user.partnerId;
     const { amount, bank } = req.body;
     const result = await payoutService.requestPayout(amount, bank, partnerId);
     res.status(201).json(result);
