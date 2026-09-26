@@ -10,7 +10,7 @@ const { detectImage } = require('../src/routes/profilePhoto');
 const app = require('../src/server');
 
 test('CIBIL validation, masking, persistence ownership, and profile photo access', async t => {
-  assert.equal(maskPan('ABCDE1234F'), 'AB***1234*');
+  assert.equal(maskPan('ABCDE1234F'), 'ABC***234F');
   assert.equal(validateInput({ name:'Test Customer', mobile:'9999999999', pan:'abcde1234f', gender:'male', consent:true }).pan, 'ABCDE1234F');
   assert.throws(() => validateInput({ name:'A', mobile:'1', pan:'bad', gender:'other', consent:false }), /highlighted fields/);
   assert.equal(detectImage(Buffer.from([137,80,78,71,13,10,26,10]))?.mime, 'image/png');
@@ -53,17 +53,22 @@ test('CIBIL validation, masking, persistence ownership, and profile photo access
   const previousMock = process.env.DEV_BUREAU_MOCK;
   const previousUrl = process.env.SUREPASS_CIBIL_API_URL;
   const previousKey = process.env.SUREPASS_CIBIL_API_KEY;
+  const prevVerUrl = process.env.VERIFYAL_CREDIT_REPORT_API_URL;
+  const prevVerKey = process.env.VERIFYAL_CREDIT_REPORT_API_KEY;
+  const prevVerToken = process.env.VERIFYAL_CREDIT_REPORT_API_TOKEN;
   process.env.DEV_BUREAU_MOCK = 'false';
   delete process.env.SUREPASS_CIBIL_API_URL; delete process.env.SUREPASS_CIBIL_API_KEY;
+  delete process.env.VERIFYAL_CREDIT_REPORT_API_URL; delete process.env.VERIFYAL_CREDIT_REPORT_API_KEY; delete process.env.VERIFYAL_CREDIT_REPORT_API_TOKEN;
   const create = await fetch(`${base}/cibil-reports`, { method:'POST', headers:headersA, body:JSON.stringify({ name:'Synthetic Customer', mobile:'9999999999', pan:'ABCDE1234F', gender:'male', consent:true }) });
   process.env.SUREPASS_CIBIL_API_URL = previousUrl; process.env.SUREPASS_CIBIL_API_KEY = previousKey;
+  process.env.VERIFYAL_CREDIT_REPORT_API_URL = prevVerUrl; process.env.VERIFYAL_CREDIT_REPORT_API_KEY = prevVerKey; process.env.VERIFYAL_CREDIT_REPORT_API_TOKEN = prevVerToken;
   process.env.DEV_BUREAU_MOCK = previousMock;
   assert.equal(create.status, 503);
   assert.equal((await create.json()).code, 'PROVIDER_NOT_CONFIGURED');
 
   const listA = await (await fetch(`${base}/cibil-reports`, { headers:headersA })).json();
   assert.equal(listA.data.length, 1);
-  assert.equal(listA.data[0].maskedPan, 'AB***1234*');
+  assert.equal(listA.data[0].maskedPan, 'ABC***234F');
   assert.equal(Object.hasOwn(listA.data[0], 'pan'), false);
   const reportId = listA.data[0].id;
   const foreignDetail = await fetch(`${base}/cibil-reports/${reportId}`, { headers:headersB });

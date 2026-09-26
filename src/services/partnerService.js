@@ -30,6 +30,7 @@ class PartnerService {
       city: partner.city || '',
       district: partner.district || '',
       state: partner.state,
+      pincode: partner.pincode || '',
       pan: partner.pan || '',
       bank: bankDisplay,
       kycStatus: partner.kyc_status,

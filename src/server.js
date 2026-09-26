@@ -16,6 +16,8 @@ const profilePhotoRoutes = require('./routes/profilePhoto');
 const notificationRoutes = require('./routes/notifications');
 const walletRoutes = require('./routes/wallet');
 const webhookRoutes = require('./routes/webhooks');
+const locationRoutes = require('./routes/location');
+const directBookingRoutes = require('./routes/directBooking');
 
 const rateLimit = require('express-rate-limit');
 
@@ -54,6 +56,8 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/cibil-reports', cibilReportRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/location', locationRoutes);
+app.use('/api/direct-booking', directBookingRoutes);
 app.use('/api/leads', leadRoutes);
 app.use('/api/payouts', payoutRoutes);
 app.use('/api/support', supportRoutes);
@@ -62,9 +66,29 @@ app.use('/api/uploads', uploadRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error('[SERVER ERROR]', err);
   const status = err.status || 500;
-  const payload = { error: err.message || 'Internal server error' };
+  const rawMsg = String(err.message || '');
+  const rawCode = String(err.code || '');
+
+  const isConnectionOrDbError =
+    rawCode === 'ECONNREFUSED' ||
+    rawCode === 'ETIMEDOUT' ||
+    rawCode === 'ENOTFOUND' ||
+    rawCode === 'PROTOCOL_CONNECTION_LOST' ||
+    rawCode.startsWith('ER_') ||
+    rawMsg.includes('ECONNREFUSED') ||
+    rawMsg.includes('127.0.0.1') ||
+    rawMsg.includes('3306') ||
+    rawMsg.toLowerCase().includes('sql');
+
+  if (isConnectionOrDbError) {
+    return res.status(500).json({
+      error: 'Unable to connect right now. Please try again.'
+    });
+  }
+
+  const payload = { error: rawMsg || 'Internal server error' };
   if (err.code) payload.code = err.code;
   if (err.details) payload.details = err.details;
   res.status(status).json(payload);

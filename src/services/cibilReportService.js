@@ -32,7 +32,7 @@ function validateInput(body = {}) {
     name: String(body.name || '').trim().replace(/\s+/g, ' '),
     mobile: String(body.mobile || '').replace(/\D/g, '').slice(-10),
     pan: String(body.pan || '').trim().toUpperCase(),
-    gender: String(body.gender || 'male').trim().toLowerCase(),
+    gender: body.gender ? String(body.gender).trim().toLowerCase() : '',
     consent: body.consent === true,
     dob: body.dob ? String(body.dob).trim() : undefined,
     address: body.address ? String(body.address).trim() : undefined,
@@ -45,7 +45,7 @@ function validateInput(body = {}) {
   if (input.name.length < 2 || input.name.length > 120) errors.name = 'Enter the customer name (2-120 characters).';
   if (!/^\d{10}$/.test(input.mobile)) errors.mobile = 'Enter a valid 10-digit mobile number.';
   if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(input.pan)) errors.pan = 'Enter a valid PAN in ABCDE1234F format.';
-  if (!['male', 'female'].includes(input.gender)) errors.gender = 'Select male or female.';
+  if (!input.gender || !['male', 'female'].includes(input.gender)) errors.gender = 'Customer gender is required (male or female).';
   if (!input.consent) errors.consent = 'Explicit customer consent is required.';
 
   // Equifax specific checks
@@ -85,8 +85,9 @@ function assertAllowedReportUrl(rawUrl) {
 
 async function downloadPdf(rawUrl) {
   const url = assertAllowedReportUrl(rawUrl);
-  const response = await fetch(url, { signal: AbortSignal.timeout(30000), redirect: 'error' });
+  const response = await fetch(url, { signal: AbortSignal.timeout(30000), redirect: 'follow' });
   if (!response.ok) throw new ApiError(502, 'REPORT_DOWNLOAD_FAILED', 'The provider report could not be downloaded.');
+  if (response.url) assertAllowedReportUrl(response.url);
   const contentLength = Number(response.headers.get('content-length') || 0);
   if (contentLength > MAX_PDF_BYTES) throw new ApiError(502, 'REPORT_TOO_LARGE', 'The provider report exceeded the secure file-size limit.');
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -98,6 +99,34 @@ async function downloadPdf(rawUrl) {
   const fullPath = path.join(REPORT_ROOT, fileName);
   await fs.writeFile(fullPath, bytes, { flag: 'wx', mode: 0o600 });
   return { fullPath, mimeType: 'application/pdf' };
+}
+
+async function extractScoreFromPdf(filePath, bureau = 'CIBIL') {
+  try {
+    const { PDFParse } = require('pdf-parse');
+    const buf = await fs.readFile(filePath);
+    const parser = new PDFParse(new Uint8Array(buf));
+    await parser.load();
+    const res = await parser.getText();
+    const text = res?.text || '';
+
+    // CIBIL patterns in CIR report:
+    // CIBILTRANSUNIONSCORE3 	756
+    // CIBILTRANSUNIONSCORE 	756
+    // SCORE NAME SCORE SCORING FACTORS \n CIBILTRANSUNIONSCORE 756
+    const cibilMatch = text.match(/CIBILTRANSUNIONSCORE\w*\s*[:\-]?\s*(-?1|[0-9]{3})/i)
+      || text.match(/SCORE\s+NAME[\s\S]*?CIBIL[^\n]*\s*[:\-]?\s*(-?1|[0-9]{3})/i)
+      || text.match(/(?:CIBIL|TRANSUNION)[^\n]*?SCORE[^\n]*?\s*[:\-]?\s*(-?1|[0-9]{3})/i)
+      || text.match(/CREDIT\s+SCORE\s*[:\-]?\s*(-?1|[0-9]{3})/i);
+
+    if (cibilMatch && cibilMatch[1]) {
+      return parseInt(cibilMatch[1], 10);
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[extractScoreFromPdf] Warning: ${err.message}`);
+    return null;
+  }
 }
 
 function isDevBureauMockEnabled() {
@@ -114,19 +143,24 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
   const input = validateInput(body);
   const bureau = input.bureau;
 
+  const paymentSource = ['wallet_money', 'earnings'].includes(body.paymentSource) ? body.paymentSource : 'any';
+
   // 1. Create pending report attempt record with initial NOT_CALLED status
-  const id = await repo.createAttempt(partnerId, input, requestMeta);
+  const id = await repo.createAttempt(partnerId, { ...input, paymentSource }, requestMeta);
   await audit.log(partnerId, 'cibil.fetch_requested', 'cibil_report', id, {
     bureau,
     consentTextVersion: 'earnmitra-cibil-v1'
   }, requestMeta.ip);
 
   const mockActive = isDevBureauMockEnabled();
+  const activeProvider = (bureau === 'EXPERIAN' || bureau === 'EQUIFAX' || (bureau === 'CRIF' && !surepassProvider.isConfigured('CRIF')) || (bureau === 'CIBIL' && verifyalProvider.isConfigured()))
+    ? verifyalProvider
+    : surepassProvider;
 
   // 2. Validate provider is actively configured (bypassed in safe development mock mode)
   if (!mockActive) {
     if (bureau === 'CIBIL') {
-      if (!surepassProvider.isConfigured('CIBIL')) {
+      if (!verifyalProvider.isConfigured() && !surepassProvider.isConfigured('CIBIL')) {
         await repo.markFailed(id, partnerId, 'FAILED', 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.', 503, 'NOT_CALLED');
         throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'CIBIL service is not configured. Please contact support.');
       }
@@ -153,7 +187,7 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
   // 4. Reserve funds in partner service wallet
   let reservation = null;
   try {
-    reservation = await walletService.reserveBureauReport(partnerId, bureau, `REP-${id}`);
+    reservation = await walletService.reserveBureauReport(partnerId, bureau, `REP-${id}`, paymentSource);
     await repo.updateBillingStatus(id, partnerId, 'RESERVED');
   } catch (walletErr) {
     if (walletErr.code === 'INSUFFICIENT_WALLET_BALANCE' || walletErr.status === 402) {
@@ -214,13 +248,22 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
       }
     };
   } else {
-    const activeProvider = (bureau === 'EXPERIAN' || bureau === 'EQUIFAX' || (bureau === 'CRIF' && !surepassProvider.isConfigured('CRIF')))
-      ? verifyalProvider
-      : surepassProvider;
-
     try {
       if (bureau === 'CIBIL') {
-        providerResult = await surepassProvider.fetchCibilReport(input);
+        if (verifyalProvider.isConfigured()) {
+          try {
+            providerResult = await verifyalProvider.fetchReport({ ...input, bureau: 'cibil' });
+          } catch (verErr) {
+            console.warn(`[cibilReportService] Verifyal CIBIL error: ${verErr.message}, checking Surepass fallback`);
+            if (surepassProvider.isConfigured('CIBIL')) {
+              providerResult = await surepassProvider.fetchCibilReport(input);
+            } else {
+              throw verErr;
+            }
+          }
+        } else if (surepassProvider.isConfigured('CIBIL')) {
+          providerResult = await surepassProvider.fetchCibilReport(input);
+        }
       } else if (bureau === 'CRIF') {
         if (surepassProvider.isConfigured('CRIF')) {
           providerResult = await surepassProvider.fetchCrifReport(input);
@@ -240,7 +283,7 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
   // Case A: Provider succeeded with valid credit report
   if (providerResult && providerResult.success) {
     // Finalize debit
-    await walletService.finalizeBureauDebit(partnerId, reservation.reservationId, bureau, `REP-${id}`, 'BUREAU_REPORT');
+    const debitRes = await walletService.finalizeBureauDebit(partnerId, reservation.reservationId, bureau, `REP-${id}`, 'BUREAU_REPORT');
 
     // Download original PDF if provided
     let downloaded = { fullPath: null, mimeType: null };
@@ -252,6 +295,31 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
       }
     }
 
+    // If credit score was not returned in API JSON (e.g. Verifyal CIBIL CIR PDF reports), extract from downloaded PDF
+    if ((providerResult.creditScore == null || providerResult.creditScore === undefined) && downloaded.fullPath) {
+      try {
+        const parsedScore = await extractScoreFromPdf(downloaded.fullPath, bureau);
+        if (parsedScore != null) {
+          providerResult.creditScore = parsedScore;
+          if (providerResult.normalizedData) {
+            providerResult.normalizedData.score = parsedScore;
+            providerResult.normalizedData.scoreCategory = parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : (parsedScore === -1 ? 'No History' : 'Needs Improvement');
+          }
+        }
+      } catch (extractErr) {
+        console.warn(`[cibilReportService] PDF score extraction failed: ${extractErr.message}`);
+      }
+    }
+
+    let resolvedPaymentSource = paymentSource;
+    if (resolvedPaymentSource === 'any') {
+      if (reservation.earnedComponent > 0 && reservation.rechargeComponent === 0) {
+        resolvedPaymentSource = 'earnings';
+      } else {
+        resolvedPaymentSource = 'wallet_money';
+      }
+    }
+
     // Mark success
     await repo.markSuccess(id, partnerId, {
       clientId: providerResult.clientId,
@@ -260,7 +328,10 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
       storagePath: downloaded.fullPath,
       mimeType: downloaded.mimeType,
       providerStatusCode: providerResult.status || 200,
-      normalizedData: providerResult.normalizedData
+      normalizedData: providerResult.normalizedData,
+      amountCharged: reservation.amount,
+      paymentSource: resolvedPaymentSource,
+      walletTransactionId: debitRes?.transactionId || reservation.reservationId
     }, 'BILLED_REPORT_READY');
 
     await audit.log(partnerId, 'cibil.fetch_succeeded', 'cibil_report', id, {
@@ -282,7 +353,7 @@ async function fetchNewReport(partnerId, body, requestMeta = {}) {
 
   // Check whether provider debited the account
   const rawResponse = providerResult || providerError?.raw;
-  const isDebited = activeProvider.isDebited(rawResponse);
+  const isDebited = mockActive ? false : (activeProvider && typeof activeProvider.isDebited === 'function' ? activeProvider.isDebited(rawResponse) : false);
 
   // Case B: Provider returned structured non-success (e.g. 422 REPORT_NOT_FOUND or rejection)
   if (providerResult && !providerResult.success) {
@@ -335,4 +406,4 @@ function safeReportPath(storedPath) {
   return resolved;
 }
 
-module.exports = { ApiError, validateInput, fetchNewReport, safeReportPath, isDevBureauMockEnabled, REPORT_ROOT };
+module.exports = { ApiError, validateInput, fetchNewReport, safeReportPath, isDevBureauMockEnabled, REPORT_ROOT, downloadPdf, assertAllowedReportUrl, extractScoreFromPdf };

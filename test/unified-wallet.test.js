@@ -96,8 +96,8 @@ test('Unified Wallet, Earnings, and Credit Bureau Upgrade', async (t) => {
       assert.equal(w1.rechargeBalance, 500.00);
       assert.equal(w1.earnedBalance, 0.00);
       assert.equal(w1.availableBalance, 500.00);
-      // Withdrawable MUST be 0 since recharge funds cannot be withdrawn!
-      assert.equal(w1.withdrawableBalance, 0.00);
+      // Withdrawable equals total balance as both Wallet Money and Earnings are withdrawable
+      assert.equal(w1.withdrawableBalance, 500.00);
 
       // Check transaction record
       const txs = await walletService.getTransactions(partnerId);
@@ -158,65 +158,97 @@ test('Unified Wallet, Earnings, and Credit Bureau Upgrade', async (t) => {
     }
   });
 
-  await t.test('4. Mixed balance: Priority deduction (recharge first, then earned)', async () => {
-    const partnerId = await createTestPartner('PRIORITY_DEDUCT');
+  await t.test('4. Exact Payment Source Isolation: Partner explicitly chooses Wallet Money OR Earnings', async () => {
+    const partnerId = await createTestPartner('EXACT_SOURCE');
     try {
-      // Partner has ₹50 recharge money and ₹200 earned commission
+      // Setup partner with ₹200.00 recharge money and ₹300.00 earned commission
       await walletRepo.creditWallet({
         partnerId,
-        amount: 50.00,
-        description: 'Recharge',
-        referenceId: 'REC_50'
+        amount: 200.00,
+        description: 'Recharge Funds',
+        referenceId: 'REC_EXACT_200'
       });
       await walletRepo.creditCommission({
         partnerId,
-        amount: 200.00,
-        referenceId: 'COMM_200',
+        amount: 300.00,
+        referenceId: 'COMM_EXACT_300',
         leadId: 99
       });
 
       const wBefore = await walletService.getWallet(partnerId);
-      assert.equal(wBefore.balance, 250.00);
-      assert.equal(wBefore.rechargeBalance, 50.00);
-      assert.equal(wBefore.earnedBalance, 200.00);
-      assert.equal(wBefore.availableBalance, 250.00);
+      assert.equal(wBefore.balance, 500.00);
+      assert.equal(wBefore.rechargeBalance, 200.00);
+      assert.equal(wBefore.earnedBalance, 300.00);
 
+      // Case A: Partner explicitly chooses 'wallet_money'
       // CIBIL costs ₹116.82.
-      // Priority deduction rule:
-      // ₹50.00 from recharge_balance -> leaves ₹0 recharge_balance
-      // ₹66.82 from earned_balance   -> leaves ₹133.18 earned_balance
-      const res = await walletService.reserveBureauReport(partnerId, 'CIBIL', 'BUREAU_INQ_1');
-      assert.equal(res.amount, 116.82);
+      // MUST debit recharge_balance ONLY (200 - 116.82 = 83.18)
+      // earned_balance MUST remain strictly 300.00!
+      const resA = await walletService.reserveBureauReport(partnerId, 'CIBIL', 'EXACT_INQ_WALLET', 'wallet_money');
+      assert.equal(resA.amount, 116.82);
 
-      const wDuring = await walletService.getWallet(partnerId);
-      assert.equal(wDuring.rechargeBalance, 0.00);
-      assert.equal(wDuring.earnedBalance, 133.18);
-      assert.equal(wDuring.balance, 133.18);
+      const wDuringA = await walletService.getWallet(partnerId);
+      assert.equal(wDuringA.rechargeBalance, 83.18);
+      assert.equal(wDuringA.earnedBalance, 300.00); // STRICTLY UNTOUCHED!
+      assert.equal(wDuringA.balance, 383.18);
 
-      // Verify transaction ledger recorded exact components
-      const [rows] = await query(
-        'SELECT * FROM partner_wallet_transactions WHERE id = ?',
-        [res.reservationId]
+      const [rowsA] = await query('SELECT * FROM partner_wallet_transactions WHERE id = ?', [resA.reservationId]);
+      assert.equal(parseFloat(rowsA[0].recharge_component), 116.82);
+      assert.equal(parseFloat(rowsA[0].earned_component), 0.00);
+
+      // Release Case A (restores ₹116.82 strictly to recharge_balance)
+      await walletService.releaseBureauReservation(partnerId, resA.reservationId, 'CIBIL', 'EXACT_INQ_WALLET', 'Release A');
+      const wRestoredA = await walletService.getWallet(partnerId);
+      assert.equal(wRestoredA.rechargeBalance, 200.00);
+      assert.equal(wRestoredA.earnedBalance, 300.00);
+
+      // Case B: Partner explicitly chooses 'earnings'
+      // CRIF costs ₹81.42.
+      // MUST debit earned_balance ONLY (300 - 81.42 = 218.58)
+      // recharge_balance MUST remain strictly 200.00!
+      const resB = await walletService.reserveBureauReport(partnerId, 'CRIF', 'EXACT_INQ_EARNED', 'earnings');
+      assert.equal(resB.amount, 81.42);
+
+      const wDuringB = await walletService.getWallet(partnerId);
+      assert.equal(wDuringB.rechargeBalance, 200.00); // STRICTLY UNTOUCHED!
+      assert.equal(wDuringB.earnedBalance, 218.58);
+      assert.equal(wDuringB.balance, 418.58);
+
+      const [rowsB] = await query('SELECT * FROM partner_wallet_transactions WHERE id = ?', [resB.reservationId]);
+      assert.equal(parseFloat(rowsB[0].recharge_component), 0.00);
+      assert.equal(parseFloat(rowsB[0].earned_component), 81.42);
+
+      // Release Case B (restores ₹81.42 strictly to earned_balance)
+      await walletService.releaseBureauReservation(partnerId, resB.reservationId, 'CRIF', 'EXACT_INQ_EARNED', 'Release B');
+      const wRestoredB = await walletService.getWallet(partnerId);
+      assert.equal(wRestoredB.rechargeBalance, 200.00);
+      assert.equal(wRestoredB.earnedBalance, 300.00);
+
+      // Case C: Insufficient 'wallet_money' fails immediately without deducting from 'earnings'
+      await query('UPDATE partner_wallets SET recharge_balance = 50.00, balance = 350.00 WHERE partner_id = ?', [partnerId]);
+      await assert.rejects(
+        async () => {
+          await walletService.reserveBureauReport(partnerId, 'CIBIL', 'FAIL_WALLET', 'wallet_money');
+        },
+        (err) => err.code === 'INSUFFICIENT_WALLET_BALANCE' && /Wallet Money balance/.test(err.message)
       );
-      const tx = rows[0];
-      assert.equal(parseFloat(tx.recharge_component), 50.00);
-      assert.equal(parseFloat(tx.earned_component), 66.82);
+      // Balances must remain completely unchanged
+      const wAfterFailWallet = await walletService.getWallet(partnerId);
+      assert.equal(wAfterFailWallet.rechargeBalance, 50.00);
+      assert.equal(wAfterFailWallet.earnedBalance, 300.00); // Untouched!
 
-      // Release reservation (e.g. no record found at bureau)
-      // Must restore exact components: ₹50 back to recharge, ₹66.82 back to earned!
-      await walletService.releaseBureauReservation(
-        partnerId,
-        res.reservationId,
-        'CIBIL',
-        'BUREAU_INQ_1',
-        'No record'
+      // Case D: Insufficient 'earnings' fails immediately without deducting from 'wallet_money'
+      await query('UPDATE partner_wallets SET earned_balance = 50.00, balance = 100.00 WHERE partner_id = ?', [partnerId]);
+      await assert.rejects(
+        async () => {
+          await walletService.reserveBureauReport(partnerId, 'CIBIL', 'FAIL_EARNED', 'earnings');
+        },
+        (err) => err.code === 'INSUFFICIENT_EARNINGS_BALANCE' && /Earnings balance/.test(err.message)
       );
-
-      const wRestored = await walletService.getWallet(partnerId);
-      assert.equal(wRestored.rechargeBalance, 50.00);
-      assert.equal(wRestored.earnedBalance, 200.00);
-      assert.equal(wRestored.balance, 250.00);
-      assert.equal(wRestored.totalSpent, 0.00);
+      // Balances must remain completely unchanged
+      const wAfterFailEarned = await walletService.getWallet(partnerId);
+      assert.equal(wAfterFailEarned.rechargeBalance, 50.00);
+      assert.equal(wAfterFailEarned.earnedBalance, 50.00);
     } finally {
       await cleanupPartner(partnerId);
     }
@@ -255,8 +287,8 @@ test('Unified Wallet, Earnings, and Credit Bureau Upgrade', async (t) => {
     }
   });
 
-  await t.test('6. Payout withdrawal isolation: Withdrawable limited to earned_balance only', async () => {
-    const partnerId = await createTestPartner('PAYOUT_ISOLATION');
+  await t.test('6. Both Balances Withdrawable: Payouts supported from Wallet Money and Earnings with strict source isolation', async () => {
+    const partnerId = await createTestPartner('PAYOUT_BOTH_SOURCES');
     try {
       // Partner has ₹500 recharge money and ₹300 earned money
       await walletRepo.creditWallet({
@@ -275,49 +307,102 @@ test('Unified Wallet, Earnings, and Credit Bureau Upgrade', async (t) => {
       const w = await walletService.getWallet(partnerId);
       assert.equal(w.balance, 800.00);
       assert.equal(w.availableBalance, 800.00);
+      assert.equal(w.withdrawableBalance, 800.00);
       assert.equal(w.rechargeBalance, 500.00);
       assert.equal(w.earnedBalance, 300.00);
-      assert.equal(w.withdrawableBalance, 300.00);
 
-      // Attempting to withdraw ₹400 must fail because earned_balance is only ₹300!
+      // 1. Payout from 'wallet_money' source:
+      // Withdraw ₹200 from Wallet Money
+      const payoutWallet = await walletRepo.debitPayout({
+        partnerId,
+        amount: 200.00,
+        referenceId: 'PAYOUT_WALLET_1',
+        sourceBalance: 'wallet_money',
+        description: 'Wallet Money withdrawal'
+      });
+      assert.equal(payoutWallet.balanceAfter, 600.00);
+      assert.equal(payoutWallet.rechargeBalanceAfter, 300.00); // 500 - 200 = 300
+      assert.equal(payoutWallet.earnedBalanceAfter, 300.00); // earned_balance untouched!
+
+      const wAfterW = await walletService.getWallet(partnerId);
+      assert.equal(wAfterW.rechargeBalance, 300.00);
+      assert.equal(wAfterW.earnedBalance, 300.00);
+
+      // 2. Payout from 'earnings' source:
+      // Withdraw ₹150 from Earnings
+      const payoutEarned = await walletRepo.debitPayout({
+        partnerId,
+        amount: 150.00,
+        referenceId: 'PAYOUT_EARNED_1',
+        sourceBalance: 'earnings',
+        description: 'Earnings commission withdrawal'
+      });
+      assert.equal(payoutEarned.balanceAfter, 450.00);
+      assert.equal(payoutEarned.rechargeBalanceAfter, 300.00); // recharge_balance untouched!
+      assert.equal(payoutEarned.earnedBalanceAfter, 150.00); // 300 - 150 = 150
+
+      const wAfterE = await walletService.getWallet(partnerId);
+      assert.equal(wAfterE.rechargeBalance, 300.00);
+      assert.equal(wAfterE.earnedBalance, 150.00);
+
+      // 3. Overdraw checks per balance source:
+      // Trying to withdraw ₹200 from earnings (only ₹150 available) fails
       await assert.rejects(
         async () => {
           await walletRepo.debitPayout({
             partnerId,
-            amount: 400.00,
-            referenceId: 'PAYOUT_REQ_FAIL'
+            amount: 200.00,
+            referenceId: 'PAYOUT_FAIL_EARN',
+            sourceBalance: 'earnings'
           });
         },
         (err) => err.code === 'INSUFFICIENT_EARNED_BALANCE' || /earned balance/.test(err.message)
       );
 
-      // Withdrawing ₹250 succeeds (less than or equal to ₹300)
-      const debitRes = await walletRepo.debitPayout({
-        partnerId,
-        amount: 250.00,
-        referenceId: 'PAYOUT_REQ_PASS',
-        notes: 'Withdrawal to Bank'
-      });
-      assert.equal(debitRes.balanceAfter, 550.00);
+      // Trying to withdraw ₹400 from wallet_money (only ₹300 available) fails
+      await assert.rejects(
+        async () => {
+          await walletRepo.debitPayout({
+            partnerId,
+            amount: 400.00,
+            referenceId: 'PAYOUT_FAIL_WALL',
+            sourceBalance: 'wallet_money'
+          });
+        },
+        (err) => err.code === 'INSUFFICIENT_WALLET_BALANCE' || /wallet money balance/.test(err.message)
+      );
 
-      const wAfterDebit = await walletService.getWallet(partnerId);
-      assert.equal(wAfterDebit.balance, 550.00);
-      assert.equal(wAfterDebit.earnedBalance, 50.00); // 300 - 250 = 50
-      assert.equal(wAfterDebit.rechargeBalance, 500.00); // completely untouched!
+      // Trying to withdraw ₹500 total (only ₹450 total available) fails
+      await assert.rejects(
+        async () => {
+          await walletRepo.debitPayout({
+            partnerId,
+            amount: 500.00,
+            referenceId: 'PAYOUT_FAIL_TOTAL',
+            sourceBalance: 'any'
+          });
+        },
+        (err) => err.code === 'INSUFFICIENT_BALANCE' || /available withdrawable balance/.test(err.message)
+      );
 
-      // If admin rejects payout, refundPayout restores ₹250 to earned_balance
+      // 4. Test Payout Service with sourceBalance parameter
+      const payoutService = require('../src/services/payoutService');
+      const reqWallet = await payoutService.requestPayout(100.00, 'HDFC Bank', partnerId, 'wallet_money');
+      assert.equal(reqWallet.status, 'REQUESTED');
+      assert.equal(reqWallet.sourceBalance, 'wallet_money');
+
+      const wAfterReq = await walletService.getWallet(partnerId);
+      assert.equal(wAfterReq.rechargeBalance, 200.00); // 300 - 100 = 200
+      assert.equal(wAfterReq.earnedBalance, 150.00); // untouched!
+
+      // 5. If admin rejects payout, refundPayout restores balance accurately
       const refundRes = await walletRepo.refundPayout({
         partnerId,
-        amount: 250.00,
-        referenceId: 'PAYOUT_REFUND_1',
-        reason: 'Bank account details invalid'
+        amount: 100.00,
+        referenceId: 'PAYOUT_REFUND_WALLET',
+        reason: 'Incorrect IFSC'
       });
-      assert.equal(refundRes.balanceAfter, 800.00);
-
-      const wRestored = await walletService.getWallet(partnerId);
-      assert.equal(wRestored.balance, 800.00);
-      assert.equal(wRestored.earnedBalance, 300.00);
-      assert.equal(wRestored.rechargeBalance, 500.00);
+      assert.equal(refundRes.balanceAfter, 450.00);
     } finally {
       await cleanupPartner(partnerId);
     }
@@ -497,4 +582,128 @@ test('Unified Wallet, Earnings, and Credit Bureau Upgrade', async (t) => {
       process.env.DEV_BUREAU_MOCK = origMock;
     }
   });
+
+  await t.test('10. Test wallet funding: idempotency, recharge allocation, and payout isolation', async () => {
+    const partnerId = await createTestPartner('TEST_CREDIT');
+    try {
+      const refId = `DEV_TEST_${Date.now()}`;
+      const res1 = await walletService.creditTestWallet({
+        partnerId,
+        amount: 5000.00,
+        referenceId: refId,
+        description: 'Automated test funding'
+      });
+      assert.equal(res1.alreadyCredited, false);
+      assert.equal(res1.balanceAfter, 5000.00);
+      assert.equal(res1.rechargeBalanceAfter, 5000.00);
+
+      // Verify wallet state
+      const w1 = await walletService.getWallet(partnerId);
+      assert.equal(w1.balance, 5000.00);
+      assert.equal(w1.rechargeBalance, 5000.00);
+      assert.equal(w1.earnedBalance, 0.00);
+      assert.equal(w1.withdrawableBalance, 5000.00);
+
+      // Attempt duplicate funding with same referenceId - must be idempotent
+      const res2 = await walletService.creditTestWallet({
+        partnerId,
+        amount: 5000.00,
+        referenceId: refId,
+        description: 'Duplicate attempt'
+      });
+      assert.equal(res2.alreadyCredited, true);
+
+      // Verify wallet balance did NOT change
+      const w2 = await walletService.getWallet(partnerId);
+      assert.equal(w2.balance, 5000.00);
+      assert.equal(w2.rechargeBalance, 5000.00);
+      assert.equal(w2.withdrawableBalance, 5000.00);
+
+      // Verify cannot withdraw from earnings via payout when earned balance is 0
+      await assert.rejects(
+        async () => {
+          await walletRepo.debitPayout({
+            partnerId,
+            amount: 1000.00,
+            referenceId: 'PAYOUT_TEST_FAIL',
+            sourceBalance: 'earnings'
+          });
+        },
+        (err) => err.code === 'INSUFFICIENT_EARNED_BALANCE' || /earned balance/.test(err.message)
+      );
+    } finally {
+      await cleanupPartner(partnerId);
+    }
+  });
+
+  await t.test('11. Real provider dispatch check without firing live paid network requests', async () => {
+    // When DEV_BUREAU_MOCK is false, mock mode is disabled
+    const origMock = process.env.DEV_BUREAU_MOCK;
+    try {
+      process.env.DEV_BUREAU_MOCK = 'false';
+      assert.equal(cibilReportService.isDevBureauMockEnabled(), false);
+
+      // Verify provider configuration status
+      const surepassProvider = require('../src/services/providers/surepassBureauProvider');
+      const verifyalProvider = require('../src/services/providers/verifyalBureauProvider');
+      assert.equal(typeof surepassProvider.isConfigured, 'function');
+      assert.equal(typeof verifyalProvider.isConfigured, 'function');
+    } finally {
+      process.env.DEV_BUREAU_MOCK = origMock;
+    }
+  });
+
+  await t.test('12. Winway Payment Gateway: Order creation, signature verification, and recharge credit', async () => {
+    const partnerId = await createTestPartner('WINWAY');
+    try {
+      const winwayProvider = require('../src/services/providers/winwayPaymentProvider');
+      assert.equal(winwayProvider.isConfigured(), true);
+
+      // 1. Create Winway recharge order
+      const orderRes = await walletService.createWinwayRechargeOrder(partnerId, {
+        amount: 250.00,
+        description: 'Test Winway Recharge'
+      });
+      assert.equal(orderRes.gateway, 'WINWAY');
+      assert.equal(orderRes.amount, 250.00);
+      assert.ok(orderRes.orderId, 'Order ID must exist');
+      assert.ok(orderRes.winwayOrderId, 'Winway Order ID must exist');
+
+      // 2. Generate authentic signature
+      const paymentId = `winpay_test_${Date.now()}`;
+      const signature = winwayProvider.generateSignature(orderRes.winwayOrderId, paymentId);
+      assert.equal(winwayProvider.verifyPaymentSignature(orderRes.winwayOrderId, paymentId, signature), true);
+
+      // Tampered signature must fail
+      assert.equal(winwayProvider.verifyPaymentSignature(orderRes.winwayOrderId, paymentId, 'invalid_sig'), false);
+
+      // 3. Verify payment via wallet service
+      const verifyRes = await walletService.verifyWinwayRechargePayment(partnerId, {
+        orderId: orderRes.orderId,
+        winwayOrderId: orderRes.winwayOrderId,
+        winwayPaymentId: paymentId,
+        signature
+      });
+      assert.equal(verifyRes.status, 'PAID');
+      assert.equal(verifyRes.amount, 250.00);
+
+      // 4. Verify wallet balance credited to recharge_balance
+      const w = await walletService.getWallet(partnerId);
+      assert.equal(w.balance, 250.00);
+      assert.equal(w.rechargeBalance, 250.00);
+      assert.equal(w.earnedBalance, 0.00);
+
+      // 5. Duplicate verification attempt is completely idempotent and returns PAID
+      const dupRes = await walletService.verifyWinwayRechargePayment(partnerId, {
+        orderId: orderRes.orderId,
+        winwayOrderId: orderRes.winwayOrderId,
+        winwayPaymentId: paymentId,
+        signature
+      });
+      assert.equal(dupRes.status, 'PAID');
+    } finally {
+      await cleanupPartner(partnerId);
+    }
+  });
 });
+

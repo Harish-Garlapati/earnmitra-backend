@@ -1,7 +1,7 @@
 const { query, pool } = require('../config/db');
 
 class LeadRepository {
-  async findAll({ partnerId, status, limit = 50, offset = 0 } = {}) {
+  async findAll({ partnerId, status, search, limit = 50, offset = 0 } = {}) {
     let sql = 'SELECT * FROM leads WHERE 1=1';
     const params = [];
 
@@ -19,7 +19,13 @@ class LeadRepository {
       }
     }
 
-    const safeLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    if (search) {
+      sql += ' AND (applicant_name LIKE ? OR mobile LIKE ? OR lead_code LIKE ?)';
+      const s = `%${search.trim()}%`;
+      params.push(s, s, s);
+    }
+
+    const safeLimit = Math.min(1000, Math.max(1, parseInt(limit, 10) || 500));
     const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
 
     sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
@@ -50,6 +56,33 @@ class LeadRepository {
   async getTimeline(leadId) {
     const [rows] = await query(
       'SELECT * FROM lead_status_history WHERE lead_id = ? ORDER BY created_at ASC',
+      [leadId]
+    );
+    return rows;
+  }
+
+  async getLoanDetails(leadId) {
+    const [rows] = await query(
+      'SELECT * FROM loan_lead_details WHERE lead_id = ? LIMIT 1',
+      [leadId]
+    );
+    return rows[0] || null;
+  }
+
+  async getBookingCode(leadId) {
+    const [rows] = await query(
+      'SELECT * FROM direct_booking_codes WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
+      [leadId]
+    );
+    return rows[0] || null;
+  }
+
+  async getLenderSelections(leadId) {
+    const [rows] = await query(
+      `SELECT dbs.*, l.name as lender_name, l.code as lender_code 
+       FROM direct_booking_lender_selections dbs
+       JOIN lenders l ON l.id = dbs.lender_id
+       WHERE dbs.lead_id = ? ORDER BY dbs.id ASC`,
       [leadId]
     );
     return rows;
@@ -98,9 +131,10 @@ class LeadRepository {
       const insertLeadSql = `
         INSERT INTO leads (
           lead_code, partner_id, product_category, loan_type, applicant_name,
-          business_name, mobile, city, applicant_type, pan, dob_or_incorporation,
-          income_or_turnover, loan_amount, status, current_stage
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          business_name, mobile, city, pincode, state, applicant_type, entity_type,
+          profession, pan, dob_or_incorporation, income_or_turnover, loan_amount,
+          monthly_salary, status, current_stage, mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
       const [leadResult] = await conn.query(insertLeadSql, [
         leadCode,
@@ -111,16 +145,56 @@ class LeadRepository {
         data.business_name || null,
         data.mobile,
         data.city,
+        data.pincode || null,
+        data.state || null,
         data.applicant_type || null,
+        data.entity_type || null,
+        data.profession || null,
         data.pan || null,
         data.dob_or_incorporation || null,
         data.income_or_turnover || null,
         data.loan_amount || 0,
+        data.monthly_salary || null,
         data.status || 'In Progress',
-        data.current_stage || 'Lead submitted'
+        data.current_stage || 'Lead submitted',
+        data.mode || 'referral'
       ]);
 
       const newLeadId = leadResult.insertId;
+
+      // If loan product, persist in loan_lead_details
+      if (data.product_category === 'Loans' || (!data.credit_card_details && !data.insurance_details)) {
+        await conn.query(
+          `INSERT INTO loan_lead_details (
+            lead_id, applicant_type, entity_type, custom_entity_type,
+            profession, custom_profession, monthly_salary, income,
+            pincode, place, state, mode, customer_consent
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newLeadId,
+            data.applicant_type || null,
+            data.entity_type || null,
+            data.custom_entity_type || null,
+            data.profession || null,
+            data.custom_profession || null,
+            data.monthly_salary || null,
+            data.income_or_turnover || null,
+            data.pincode || null,
+            data.city || null,
+            data.state || null,
+            data.mode || 'referral',
+            data.customer_consent === false ? 0 : 1
+          ]
+        );
+      }
+
+      // If direct booking code provided, record it
+      if (data.booking_code) {
+        await conn.query(
+          `INSERT INTO direct_booking_codes (lead_id, partner_id, code, is_validated) VALUES (?, ?, ?, 0)`,
+          [newLeadId, data.partner_id, data.booking_code]
+        );
+      }
 
       // If credit card lead, save credit card specific details
       if (data.credit_card_details) {

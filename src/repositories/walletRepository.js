@@ -268,7 +268,104 @@ class WalletRepository {
     }
   }
 
-  async debitPayout({ partnerId, amount, referenceId, description = null, conn = null }) {
+  async creditTestWallet({ partnerId, amount, referenceId, description = 'Local development test wallet credit', conn = null }) {
+    const numAmount = Number(amount);
+    if (numAmount <= 0) throw new Error('Test credit amount must be positive');
+
+    let connection = conn;
+    let shouldRelease = false;
+
+    if (!connection) {
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      shouldRelease = true;
+    }
+
+    try {
+      const refId = String(referenceId);
+      // 1. Idempotency Check: Don't credit if referenceId already exists
+      const [existing] = await connection.query(
+        `SELECT id, amount, balance_after FROM partner_wallet_transactions
+         WHERE partner_id = ? AND category = 'DEV_TEST_CREDIT' AND reference_id = ? LIMIT 1`,
+        [partnerId, refId]
+      );
+
+      if (existing.length > 0) {
+        if (shouldRelease) {
+          await connection.commit();
+          connection.release();
+        }
+        return {
+          alreadyCredited: true,
+          transactionId: existing[0].id,
+          amount: Number(existing[0].amount),
+          balanceAfter: Number(existing[0].balance_after)
+        };
+      }
+
+      // 2. Lock wallet row FOR UPDATE
+      const [walletRows] = await connection.query(
+        'SELECT * FROM partner_wallets WHERE partner_id = ? FOR UPDATE',
+        [partnerId]
+      );
+
+      let wallet = walletRows[0];
+      if (!wallet) {
+        await connection.query(
+          'INSERT INTO partner_wallets (partner_id, balance, earned_balance, recharge_balance, total_recharged, total_spent) VALUES (?, 0.00, 0.00, 0.00, 0.00, 0.00)',
+          [partnerId]
+        );
+        const [reloaded] = await connection.query(
+          'SELECT * FROM partner_wallets WHERE partner_id = ? FOR UPDATE',
+          [partnerId]
+        );
+        wallet = reloaded[0];
+      }
+
+      const balanceBefore = Number(wallet.balance);
+      const currentRecharge = Number(wallet.recharge_balance || 0);
+      const newRecharge = Number((currentRecharge + numAmount).toFixed(2));
+      const currentEarned = Number(wallet.earned_balance || 0);
+      const balanceAfter = Number((newRecharge + currentEarned).toFixed(2));
+      const totalRecharged = Number((Number(wallet.total_recharged) + numAmount).toFixed(2));
+
+      // 3. Update wallet row: only recharge_balance is incremented (non-withdrawable)
+      await connection.query(
+        'UPDATE partner_wallets SET balance = ?, recharge_balance = ?, total_recharged = ? WHERE partner_id = ?',
+        [balanceAfter, newRecharge, totalRecharged, partnerId]
+      );
+
+      // 4. Write immutable ledger entry
+      const [txResult] = await connection.query(
+        `INSERT INTO partner_wallet_transactions
+         (partner_id, transaction_type, category, amount, net_amount, recharge_component, earned_component, balance_before, balance_after, description, reference_id, payment_gateway, status)
+         VALUES (?, 'CREDIT', 'DEV_TEST_CREDIT', ?, ?, ?, 0.00, ?, ?, ?, ?, 'INTERNAL_TEST', 'SUCCESS')`,
+        [partnerId, numAmount, numAmount, numAmount, balanceBefore, balanceAfter, description, refId]
+      );
+
+      if (shouldRelease) {
+        await connection.commit();
+        connection.release();
+      }
+
+      return {
+        alreadyCredited: false,
+        transactionId: txResult.insertId,
+        balanceBefore,
+        balanceAfter,
+        rechargeBalanceAfter: newRecharge,
+        amount: numAmount
+      };
+    } catch (err) {
+      if (shouldRelease) {
+        await connection.rollback();
+        connection.release();
+      }
+      throw err;
+    }
+  }
+
+  async debitPayout({ partnerId, amount, referenceId, description = null, sourceBalance = 'any', conn = null }) {
     const numAmount = Number(amount);
     if (numAmount <= 0) throw new Error('Payout debit amount must be positive');
 
@@ -290,29 +387,57 @@ class WalletRepository {
       const wallet = walletRows[0];
       if (!wallet) throw new Error('Partner wallet not found');
 
+      const balanceBefore = Number(wallet.balance);
       const earnedBefore = Number(wallet.earned_balance || 0);
-      if (earnedBefore < numAmount) {
+      const rechargeBefore = Number(wallet.recharge_balance || 0);
+
+      if (sourceBalance === 'earnings' && earnedBefore < numAmount) {
         const err = new Error('Requested payout exceeds withdrawable earned balance');
         err.code = 'INSUFFICIENT_EARNED_BALANCE';
         err.status = 400;
         throw err;
       }
 
-      const balanceBefore = Number(wallet.balance);
-      const earnedAfter = Number((earnedBefore - numAmount).toFixed(2));
-      const rechargeBalance = Number(wallet.recharge_balance || 0);
-      const balanceAfter = Number((earnedAfter + rechargeBalance).toFixed(2));
+      if (sourceBalance === 'wallet_money' && rechargeBefore < numAmount) {
+        const err = new Error('Requested payout exceeds withdrawable wallet money balance');
+        err.code = 'INSUFFICIENT_WALLET_BALANCE';
+        err.status = 400;
+        throw err;
+      }
+
+      if (balanceBefore < numAmount) {
+        const err = new Error('Requested payout exceeds available withdrawable balance');
+        err.code = 'INSUFFICIENT_BALANCE';
+        err.status = 400;
+        throw err;
+      }
+
+      let earnedDeduct = 0;
+      let rechargeDeduct = 0;
+
+      if (sourceBalance === 'wallet_money') {
+        rechargeDeduct = numAmount;
+      } else if (sourceBalance === 'earnings') {
+        earnedDeduct = numAmount;
+      } else {
+        earnedDeduct = Math.min(earnedBefore, numAmount);
+        rechargeDeduct = Number((numAmount - earnedDeduct).toFixed(2));
+      }
+
+      const earnedAfter = Number((earnedBefore - earnedDeduct).toFixed(2));
+      const rechargeAfter = Number((rechargeBefore - rechargeDeduct).toFixed(2));
+      const balanceAfter = Number((earnedAfter + rechargeAfter).toFixed(2));
 
       await connection.query(
-        'UPDATE partner_wallets SET balance = ?, earned_balance = ? WHERE partner_id = ?',
-        [balanceAfter, earnedAfter, partnerId]
+        'UPDATE partner_wallets SET balance = ?, earned_balance = ?, recharge_balance = ? WHERE partner_id = ?',
+        [balanceAfter, earnedAfter, rechargeAfter, partnerId]
       );
 
       const [txResult] = await connection.query(
         `INSERT INTO partner_wallet_transactions
          (partner_id, transaction_type, category, amount, net_amount, recharge_component, earned_component, balance_before, balance_after, description, reference_id, status)
-         VALUES (?, 'DEBIT', 'PAYOUT', ?, ?, 0.00, ?, ?, ?, ?, ?, 'SUCCESS')`,
-        [partnerId, numAmount, numAmount, numAmount, balanceBefore, balanceAfter, description || `Payout Request ${referenceId}`, referenceId]
+         VALUES (?, 'DEBIT', 'PAYOUT', ?, ?, ?, ?, ?, ?, ?, ?, 'SUCCESS')`,
+        [partnerId, numAmount, numAmount, rechargeDeduct, earnedDeduct, balanceBefore, balanceAfter, description || `Payout Request ${referenceId}`, referenceId]
       );
 
       if (shouldRelease) {
@@ -325,6 +450,9 @@ class WalletRepository {
         balanceBefore,
         balanceAfter,
         earnedBalanceAfter: earnedAfter,
+        rechargeBalanceAfter: rechargeAfter,
+        earnedComponent: earnedDeduct,
+        rechargeComponent: rechargeDeduct,
         amount: numAmount
       };
     } catch (err) {
@@ -575,7 +703,7 @@ class WalletRepository {
     }
   }
 
-  async reserveWallet({ partnerId, amount, bureau, referenceId, basePrice = null, gstPercentage = 18.00, gstAmount = null, conn = null }) {
+  async reserveWallet({ partnerId, amount, bureau, referenceId, basePrice = null, gstPercentage = 18.00, gstAmount = null, paymentSource = 'any', conn = null }) {
     const numAmount = Number(amount);
     if (numAmount <= 0) throw new Error('Reservation amount must be positive');
 
@@ -608,19 +736,40 @@ class WalletRepository {
       }
 
       const balanceBefore = Number(wallet.balance);
-      if (balanceBefore < numAmount) {
-        const err = new Error('Insufficient wallet balance');
-        err.code = 'INSUFFICIENT_WALLET_BALANCE';
-        err.status = 402;
-        throw err;
-      }
-
-      // Spending priority: 1. recharge_balance, 2. earned_balance
       const currentRecharge = Number(wallet.recharge_balance || 0);
       const currentEarned = Number(wallet.earned_balance || 0);
 
-      const rechargeAlloc = Math.min(currentRecharge, numAmount);
-      const earnedAlloc = Number((numAmount - rechargeAlloc).toFixed(2));
+      let rechargeAlloc = 0;
+      let earnedAlloc = 0;
+
+      if (paymentSource === 'wallet_money') {
+        if (currentRecharge < numAmount) {
+          const err = new Error('Insufficient Wallet Money balance. Please recharge your wallet.');
+          err.code = 'INSUFFICIENT_WALLET_BALANCE';
+          err.status = 402;
+          throw err;
+        }
+        rechargeAlloc = numAmount;
+        earnedAlloc = 0;
+      } else if (paymentSource === 'earnings') {
+        if (currentEarned < numAmount) {
+          const err = new Error('Insufficient Earnings balance.');
+          err.code = 'INSUFFICIENT_EARNINGS_BALANCE';
+          err.status = 402;
+          throw err;
+        }
+        rechargeAlloc = 0;
+        earnedAlloc = numAmount;
+      } else {
+        if (balanceBefore < numAmount) {
+          const err = new Error('Insufficient wallet balance');
+          err.code = 'INSUFFICIENT_WALLET_BALANCE';
+          err.status = 402;
+          throw err;
+        }
+        rechargeAlloc = Math.min(currentRecharge, numAmount);
+        earnedAlloc = Number((numAmount - rechargeAlloc).toFixed(2));
+      }
 
       const newRecharge = Number((currentRecharge - rechargeAlloc).toFixed(2));
       const newEarned = Number((currentEarned - earnedAlloc).toFixed(2));

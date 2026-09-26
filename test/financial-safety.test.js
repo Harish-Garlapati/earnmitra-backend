@@ -192,9 +192,13 @@ async function runFinancialSafetyTests() {
     const blockedLeadRes = await request('/api/leads', { method: 'POST', headers: partnerHeaders }, {
       applicantName: 'Blocked Borrower',
       mobile: '9876500001',
-      city: 'Hyderabad',
+      pincode: '500081',
+      place: 'Hyderabad',
+      state: 'Telangana',
       loanType: 'Personal Loan',
-      loanAmount: 100000
+      loanAmount: 100000,
+      consent: true,
+      mode: 'referral'
     });
     assert(blockedLeadRes.status === 403, 'Suspended partner lead creation blocked with HTTP 403');
 

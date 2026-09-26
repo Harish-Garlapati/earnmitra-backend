@@ -54,10 +54,14 @@ async function runE2ESync() {
     loanType: 'Personal Loan',
     applicantName: 'Vikramaditya Verma',
     mobile: '9988776655',
-    city: 'Pune',
+    pincode: '411001',
+    place: 'Pune',
+    state: 'Maharashtra',
     loanAmount: 750000,
     pan: 'ABCDE1234F',
-    applicantType: 'Salaried'
+    applicantType: 'Individual',
+    consent: true,
+    mode: 'referral'
   };
 
   const createRes = await request('/api/leads', { method: 'POST', headers: partnerHeaders }, newLeadPayload);

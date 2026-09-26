@@ -93,17 +93,49 @@ router.post('/recharge/order', async (req, res, next) => {
 });
 
 /**
- * POST /api/wallet/recharge/verify
- * Checks status of order directly with Cashfree and credits wallet if successful
+ * POST /api/wallet/winway/order
+ * Creates an official Winway payment gateway order for wallet recharge
  */
-router.post('/recharge/verify', async (req, res, next) => {
+router.post('/winway/order', async (req, res, next) => {
   try {
-    const { orderId } = req.body;
+    const { amount, description } = req.body;
+    if (!amount || Number(amount) < 10) {
+      return res.status(400).json({
+        error: 'Minimum recharge amount is ₹10',
+        code: 'INVALID_AMOUNT'
+      });
+    }
+
+    const order = await walletService.createWinwayRechargeOrder(req.user.partnerId, {
+      amount: Number(amount),
+      description: description || 'Earnmitra Wallet Recharge via Winway'
+    });
+
+    res.json({
+      success: true,
+      order
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/wallet/winway/verify
+ * Verifies Winway payment signature and atomically credits wallet
+ */
+router.post('/winway/verify', async (req, res, next) => {
+  try {
+    const { orderId, winwayPaymentId, winwaySignature } = req.body;
     if (!orderId) {
       return res.status(400).json({ error: 'orderId is required', code: 'MISSING_ORDER_ID' });
     }
 
-    const result = await walletService.verifyRechargePayment(req.user.partnerId, orderId);
+    const result = await walletService.verifyWinwayRechargePayment(req.user.partnerId, orderId, {
+      winwayPaymentId,
+      winwaySignature
+    });
+
     res.json({
       success: true,
       ...result

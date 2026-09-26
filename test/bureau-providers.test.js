@@ -39,6 +39,74 @@ test('Bureau Providers & Multi-Bureau Validation', async (t) => {
     assert.equal(validated.pincode, '500081');
   });
 
+  await t.test('Gender validation is strictly enforced across all bureaus', () => {
+    // 1. Missing gender for CIBIL rejects with 422
+    assert.throws(() => {
+      validateInput({
+        bureau: 'CIBIL',
+        name: 'Rahul Sharma',
+        mobile: '9876543210',
+        pan: 'ABCDE1234F',
+        consent: true
+      });
+    }, (err) => err.status === 422 && /gender.*required/i.test(err.details?.gender || ''));
+
+    // 2. Missing gender for CRIF rejects with 422
+    assert.throws(() => {
+      validateInput({
+        bureau: 'CRIF',
+        name: 'Anita Verma',
+        mobile: '9876543210',
+        pan: 'ABCDE1234F',
+        consent: true
+      });
+    }, (err) => err.status === 422 && /gender.*required/i.test(err.details?.gender || ''));
+
+    // 3. Missing gender for EXPERIAN rejects with 422
+    assert.throws(() => {
+      validateInput({
+        bureau: 'EXPERIAN',
+        name: 'Anita Verma',
+        mobile: '9876543210',
+        pan: 'ABCDE1234F',
+        consent: true
+      });
+    }, (err) => err.status === 422 && /gender.*required/i.test(err.details?.gender || ''));
+
+    // 4. Invalid gender rejects with 422
+    assert.throws(() => {
+      validateInput({
+        bureau: 'CIBIL',
+        name: 'Anita Verma',
+        mobile: '9876543210',
+        pan: 'ABCDE1234F',
+        gender: 'unknown',
+        consent: true
+      });
+    }, (err) => err.status === 422 && /gender.*required/i.test(err.details?.gender || ''));
+
+    // 5. Valid gender 'female' and 'male' accepted
+    const valFemale = validateInput({
+      bureau: 'CIBIL',
+      name: 'Anita Verma',
+      mobile: '9876543210',
+      pan: 'ABCDE1234F',
+      gender: 'female',
+      consent: true
+    });
+    assert.equal(valFemale.gender, 'female');
+
+    const valMale = validateInput({
+      bureau: 'CIBIL',
+      name: 'Rahul Sharma',
+      mobile: '9876543210',
+      pan: 'ABCDE1234F',
+      gender: 'male',
+      consent: true
+    });
+    assert.equal(valMale.gender, 'male');
+  });
+
   await t.test('Surepass provider parses authentic response without synthetic score mutation', () => {
     const mockSurepassSuccess = {
       data: {
@@ -114,5 +182,57 @@ test('Bureau Providers & Multi-Bureau Validation', async (t) => {
     assert.equal(surepassProvider.isDebited({ status: 422, data: null }), false);
     assert.equal(surepassProvider.isDebited(null), false);
   });
+
+  await t.test('assertAllowedReportUrl accepts allowed hosts and subdomains', () => {
+    const { assertAllowedReportUrl } = require('../src/services/cibilReportService');
+    // Allowed hosts
+    assert.doesNotThrow(() => assertAllowedReportUrl('https://aadhaar-kyc-docs.s3.amazonaws.com/test.pdf'));
+    assert.doesNotThrow(() => assertAllowedReportUrl('https://files.loancrm.org/uploads/test.pdf'));
+    assert.doesNotThrow(() => assertAllowedReportUrl('https://console.verifyal.com/uploads/reports/test.pdf'));
+    assert.doesNotThrow(() => assertAllowedReportUrl('https://kyc-api.surepass.io/reports/test.pdf'));
+    // Untrusted hosts must be rejected
+    assert.throws(() => assertAllowedReportUrl('https://malicious.evil-domain.com/fake.pdf'), (err) => err.code === 'UNTRUSTED_REPORT_URL');
+    assert.throws(() => assertAllowedReportUrl('http://insecure-http.com/test.pdf'), (err) => err.code === 'UNTRUSTED_REPORT_URL');
+  });
+
+  await t.test('cibilReportRepository publicReport decouples hasFullReport from pdfAvailable', () => {
+    const { publicReport } = require('../src/repositories/cibilReportRepository');
+    
+    // Case 1: Report with data but without stored PDF
+    const withoutPdf = publicReport({
+      id: 101,
+      bureau: 'CIBIL',
+      credit_score: 750,
+      report_storage_path: null,
+      normalized_data_json: JSON.stringify({ score: 750, totalAccounts: 4 })
+    });
+    assert.equal(withoutPdf.hasFullReport, true);
+    assert.equal(withoutPdf.pdfAvailable, false);
+    assert.equal(withoutPdf.hasOriginalReport, false);
+
+    // Case 2: Report with stored PDF
+    const withPdf = publicReport({
+      id: 102,
+      bureau: 'CIBIL',
+      credit_score: 750,
+      report_storage_path: 'uploads/cibil-reports/sample.pdf',
+      normalized_data_json: JSON.stringify({ score: 750, totalAccounts: 4 })
+    });
+    assert.equal(withPdf.hasFullReport, true);
+    assert.equal(withPdf.pdfAvailable, true);
+    assert.equal(withPdf.hasOriginalReport, true);
+  });
+
+  await t.test('extractScoreFromPdf parses CIR CIBIL score accurately from PDF report', async () => {
+    const { extractScoreFromPdf } = require('../src/services/cibilReportService');
+    const path = require('path');
+    const fs = require('fs');
+    const samplePath = path.resolve(__dirname, '../uploads/cibil-reports/34bc3dc5-8b38-42f9-9c14-6b02a5da2af2.pdf');
+    if (fs.existsSync(samplePath)) {
+      const score = await extractScoreFromPdf(samplePath, 'CIBIL');
+      assert.equal(score, 756);
+    }
+  });
 });
+
 

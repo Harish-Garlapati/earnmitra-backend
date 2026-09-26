@@ -64,55 +64,52 @@ class PayoutRepository {
     }));
   }
 
-  async createPayoutRequest(partnerId, amount, bank) {
+  async createPayoutRequest(partnerId, amount, bank, sourceBalance = 'any') {
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
 
-      // Check current available balance
-      const [rows] = await conn.query(
-        `SELECT SUM(CASE WHEN status = 'available' OR (earning_type = 'payout' AND status = 'pending') THEN amount ELSE 0 END) AS available
-         FROM partner_earnings
-         WHERE partner_id = ? FOR UPDATE`,
-        [partnerId]
-      );
-
-      const available = Number(rows[0]?.available) || 0;
-      if (amount > available) {
-        throw new Error('Requested amount exceeds available balance');
+      const numAmount = Number(amount);
+      if (!numAmount || numAmount <= 0) {
+        throw new Error('amount must be greater than 0');
       }
 
       const refNumber = `PAY-${Date.now().toString().slice(-6)}`;
+
+      // Debit from wallet using walletRepository (validates balance, locks FOR UPDATE, isolates sourceBalance)
+      const walletRepo = require('./walletRepository');
+      const debitResult = await walletRepo.debitPayout({
+        partnerId,
+        amount: numAmount,
+        referenceId: refNumber,
+        description: `Payout request ${refNumber}`,
+        sourceBalance,
+        conn
+      });
+
       const [payoutResult] = await conn.query(
         `INSERT INTO payout_requests (partner_id, amount, status, reference_number)
          VALUES (?, ?, 'REQUESTED', ?)`,
-        [partnerId, amount, refNumber]
+        [partnerId, numAmount, refNumber]
       );
 
-      // Debit from partner_earnings by adding a pending debit or reducing available
-      await conn.query(
-        `INSERT INTO partner_earnings (partner_id, amount, earning_type, status, description)
-         VALUES (?, ?, 'payout', 'pending', ?)`,
-        [partnerId, -amount, `Payout request ${refNumber}`]
-      );
-
-      // Reserve from partner_wallets earned_balance (strictly earned funds only)
-      const walletRepo = require('./walletRepository');
-      await walletRepo.debitPayout({
-        partnerId,
-        amount,
-        referenceId: refNumber,
-        description: `Payout request ${refNumber}`,
-        conn
-      });
+      // If earned funds were debited, record in partner_earnings as pending debit
+      if (debitResult.earnedComponent > 0) {
+        await conn.query(
+          `INSERT INTO partner_earnings (partner_id, amount, earning_type, status, description)
+           VALUES (?, ?, 'payout', 'pending', ?)`,
+          [partnerId, -debitResult.earnedComponent, `Payout request ${refNumber}`]
+        );
+      }
 
       await conn.commit();
 
       return {
         id: payoutResult.insertId,
         referenceNumber: refNumber,
-        amount,
-        status: 'REQUESTED'
+        amount: numAmount,
+        status: 'REQUESTED',
+        debitResult
       };
     } catch (err) {
       await conn.rollback();

@@ -6,9 +6,9 @@ const { authenticate } = require('../middleware/authMiddleware');
 // GET /api/leads?status=In+Progress&limit=50&offset=0&page=1
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { status, limit, offset, page } = req.query;
+    const { status, limit, offset, page, search, q } = req.query;
     const partnerId = req.user.partnerId;
-    const list = await leadService.listLeads({ status, partnerId, limit, offset, page });
+    const list = await leadService.listLeads({ status, search: search || q, partnerId, limit, offset, page });
     res.json(list);
   } catch (err) {
     next(err);

@@ -29,23 +29,24 @@ class PartnerRepository {
     const sql = `
       INSERT INTO partners (
         partner_code, full_name, mobile, email, partner_type, 
-        business_name, city, district, state, pan, kyc_status, approval_status,
+        business_name, city, district, state, pincode, pan, kyc_status, approval_status,
         bank_account_name, bank_account_number, bank_ifsc, bank_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const params = [
       data.partner_code,
       data.full_name,
       data.mobile,
       data.email || null,
-      data.partner_type,
+      data.partner_type || 'Individual',
       data.business_name || null,
       data.city || null,
       data.district || null,
-      data.state,
+      data.state || 'Telangana',
+      data.pincode || null,
       data.pan || null,
       data.kyc_status || 'pending',
-      data.approval_status || 'pending',
+      data.approval_status || 'active',
       data.bank_account_name || null,
       data.bank_account_number || null,
       data.bank_ifsc || null,
@@ -67,9 +68,13 @@ class PartnerRepository {
     const [rows] = await query(
       `SELECT 
         COUNT(*) AS totalSubmitted,
+        SUM(CASE WHEN status IN ('Sanctioned', 'Approved') THEN 1 ELSE 0 END) AS sanctions,
         SUM(CASE WHEN status = 'Disbursed' THEN 1 ELSE 0 END) AS disbursed,
         SUM(CASE WHEN status = 'In Progress' OR status = 'Under Review' THEN 1 ELSE 0 END) AS inProgress,
-        SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END) AS rejected
+        SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN product_category = 'Loans' THEN 1 ELSE 0 END) AS loans,
+        SUM(CASE WHEN product_category = 'Credit Cards' THEN 1 ELSE 0 END) AS cards,
+        SUM(CASE WHEN product_category = 'Insurance' THEN 1 ELSE 0 END) AS insurance
        FROM leads 
        WHERE partner_id = ?`,
       [partnerId]
@@ -77,7 +82,12 @@ class PartnerRepository {
 
     const counts = rows[0] || {};
     return {
+      leads: Number(counts.totalSubmitted) || 0,
       submitted: Number(counts.totalSubmitted) || 0,
+      loans: Number(counts.loans) || 0,
+      cards: Number(counts.cards) || 0,
+      insurance: Number(counts.insurance) || 0,
+      sanctions: Number(counts.sanctions) || 0,
       disbursed: Number(counts.disbursed) || 0,
       inProgress: Number(counts.inProgress) || 0,
       rejected: Number(counts.rejected) || 0

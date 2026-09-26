@@ -44,6 +44,12 @@ router.get('/', async (req, res, next) => {
       providerConfigured: hasSurepass || hasVerifyal,
       availableBureaus,
       walletBalance: wallet.balance,
+      wallet: {
+        balance: wallet.balance,
+        walletMoney: wallet.rechargeBalance,
+        earnings: wallet.earnedBalance,
+        withdrawableBalance: wallet.withdrawableBalance
+      },
       pricing,
       testMode: isMock,
       isMock

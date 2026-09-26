@@ -2,7 +2,7 @@ const { query } = require('../config/db');
 
 function maskPan(pan) {
   const value = String(pan || '').toUpperCase();
-  return value.length === 10 ? `${value.slice(0, 2)}***${value.slice(5, 9)}*` : '';
+  return value.length === 10 ? `${value.slice(0, 3)}***${value.slice(6)}` : '';
 }
 
 function publicReport(row, includeCustomer = false) {
@@ -29,10 +29,15 @@ function publicReport(row, includeCustomer = false) {
     gender: row.gender,
     creditScore: row.credit_score == null ? null : Number(row.credit_score),
     status: row.status,
+    amountCharged: row.amount_charged != null ? Number(row.amount_charged) : null,
+    paymentSource: row.payment_source || null,
+    walletTransactionId: row.wallet_transaction_id ? Number(row.wallet_transaction_id) : null,
     billingStatus: row.billing_status || 'EXEMPT',
     failureCode: row.failure_code || null,
     failureMessage: row.failure_message || null,
     hasOriginalReport: Boolean(row.report_storage_path),
+    hasFullReport: Boolean(row.normalized_data_json || row.credit_score !== null),
+    pdfAvailable: Boolean(row.report_storage_path),
     normalizedData: parsedNormalized,
     isMock: Boolean(isMock),
     testMode: Boolean(testMode),
@@ -47,12 +52,13 @@ class CibilReportRepository {
   async createAttempt(partnerId, input, requestMeta = {}) {
     const bureau = (input.bureau || 'CIBIL').toUpperCase();
     const provider = input.provider || (['EXPERIAN', 'EQUIFAX'].includes(bureau) ? 'verifyal' : 'surepass');
+    const paymentSource = input.paymentSource || 'wallet_money';
 
     const [result] = await query(
       `INSERT INTO partner_cibil_reports
-       (partner_id, bureau, provider, customer_name, mobile, pan, gender, consent_given, consent_text_version,
+       (partner_id, bureau, provider, customer_name, mobile, pan, gender, payment_source, consent_given, consent_text_version,
         consented_at, consent_ip, consent_user_agent, status, billing_status, requested_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, ?, ?, 'PROCESSING', 'NOT_CALLED', CURRENT_TIMESTAMP)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, ?, ?, 'PROCESSING', 'NOT_CALLED', CURRENT_TIMESTAMP)`,
       [
         partnerId,
         bureau,
@@ -61,6 +67,7 @@ class CibilReportRepository {
         input.mobile,
         input.pan,
         input.gender,
+        paymentSource,
         'earnmitra-cibil-v1',
         requestMeta.ip || null,
         requestMeta.userAgent || null
@@ -82,6 +89,8 @@ class CibilReportRepository {
        SET provider_client_id = ?, provider = COALESCE(?, provider), credit_score = ?, status = 'SUCCESS',
            report_storage_path = ?, report_mime_type = ?, provider_status_code = ?,
            normalized_data_json = ?, billing_status = ?, completed_at = CURRENT_TIMESTAMP,
+           amount_charged = COALESCE(?, amount_charged), payment_source = COALESCE(?, payment_source),
+           wallet_transaction_id = COALESCE(?, wallet_transaction_id),
            failure_code = NULL, failure_message = NULL
        WHERE id = ? AND partner_id = ?`,
       [
@@ -93,6 +102,9 @@ class CibilReportRepository {
         data.providerStatusCode || 200,
         data.normalizedData ? JSON.stringify(data.normalizedData) : null,
         billingStatus,
+        data.amountCharged != null ? data.amountCharged : null,
+        data.paymentSource || null,
+        data.walletTransactionId || null,
         id,
         partnerId
       ]

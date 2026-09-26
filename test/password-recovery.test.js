@@ -28,7 +28,7 @@ test('password recovery requires a valid scoped OTP, changes the password, and r
   });
 
   const otpResult = await authService.sendOtp(mobile, 'password_reset');
-  assert.match(otpResult.devOtp || '', /^\d{6}$/);
+  assert.match(otpResult.devOtp || '', /^\d{4,6}$/);
   await assert.rejects(
     authService.resetPassword({ mobile, otp: '000000', newPassword, confirmPassword: newPassword }),
     /Invalid OTP/

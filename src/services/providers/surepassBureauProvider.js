@@ -51,7 +51,14 @@ class SurepassBureauProvider {
         bureau,
         scoreCategory: parsedScore ? (parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : 'Needs Improvement') : null,
         clientId: data.client_id || null,
-        totalAccounts: data.summary?.total_accounts ?? null,
+        paymentHistory: data.payment_history || data.credit_factors?.payment_history || null,
+        creditUtilization: data.credit_utilization || data.credit_factors?.credit_utilization || null,
+        creditAge: data.credit_age || data.credit_factors?.credit_age || (data.summary?.credit_age ? `${data.summary.credit_age} Years` : null),
+        totalAccounts: data.summary?.total_accounts ?? (Array.isArray(data.accounts) ? data.accounts.length : null),
+        recentEnquiries: data.summary?.recent_enquiries ?? (Array.isArray(data.enquiries) ? data.enquiries.length : null),
+        summary: data.summary || null,
+        accounts: data.accounts || null,
+        enquiries: data.enquiries || null,
         reportDate: new Date().toISOString()
       },
       raw: json
@@ -142,6 +149,14 @@ class SurepassBureauProvider {
         bureau: 'CIBIL',
         scoreCategory: parsedScore ? (parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : 'Needs Improvement') : null,
         clientId: data.client_id || null,
+        paymentHistory: data.payment_history || data.credit_factors?.payment_history || null,
+        creditUtilization: data.credit_utilization || data.credit_factors?.credit_utilization || null,
+        creditAge: data.credit_age || data.credit_factors?.credit_age || (data.summary?.credit_age ? `${data.summary.credit_age} Years` : null),
+        totalAccounts: data.summary?.total_accounts ?? (Array.isArray(data.accounts) ? data.accounts.length : null),
+        recentEnquiries: data.summary?.recent_enquiries ?? (Array.isArray(data.enquiries) ? data.enquiries.length : null),
+        summary: data.summary || null,
+        accounts: data.accounts || null,
+        enquiries: data.enquiries || null,
         reportDate: new Date().toISOString()
       },
       raw: json
@@ -234,6 +249,14 @@ class SurepassBureauProvider {
         bureau: 'CRIF High Mark',
         scoreCategory: parsedScore ? (parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : 'Needs Improvement') : null,
         clientId: data.client_id || null,
+        paymentHistory: data.payment_history || data.credit_factors?.payment_history || null,
+        creditUtilization: data.credit_utilization || data.credit_factors?.credit_utilization || null,
+        creditAge: data.credit_age || data.credit_factors?.credit_age || (data.summary?.credit_age ? `${data.summary.credit_age} Years` : null),
+        totalAccounts: data.summary?.total_accounts ?? (Array.isArray(data.accounts) ? data.accounts.length : null),
+        recentEnquiries: data.summary?.recent_enquiries ?? (Array.isArray(data.enquiries) ? data.enquiries.length : null),
+        summary: data.summary || null,
+        accounts: data.accounts || null,
+        enquiries: data.enquiries || null,
         reportDate: new Date().toISOString()
       },
       raw: json

@@ -14,10 +14,21 @@ const passwordResetLimiter = rateLimit({
 
 const otpSendLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: (process.env.NODE_ENV === 'test' || process.env.DEV_OTP_EXPOSE === 'true') ? 100 : 5,
+  max: (process.env.NODE_ENV === 'test' || process.env.DEV_OTP_EXPOSE === 'true' || process.env.NODE_ENV !== 'production') ? 100 : 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many OTP requests. Please try again later.', code: 'OTP_RATE_LIMITED' }
+});
+
+// POST /api/auth/partner/signup
+router.post('/partner/signup', otpSendLimiter, async (req, res, next) => {
+  try {
+    const result = await authService.initiatePartnerSignup(req.body);
+    res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
 });
 
 // POST /api/auth/otp/send
@@ -32,14 +43,30 @@ router.post('/otp/send', otpSendLimiter, async (req, res, next) => {
   }
 });
 
+// POST /api/auth/otp/resend (alias of otp/send)
+router.post('/otp/resend', otpSendLimiter, async (req, res, next) => {
+  try {
+    const { mobile, purpose } = req.body;
+    const result = await authService.sendOtp(mobile, purpose);
+    res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 // POST /api/auth/otp/verify
 router.post('/otp/verify', async (req, res, next) => {
   try {
     const { mobile, otp, purpose, deviceId, deviceName, platform } = req.body;
-    const result = await authService.verifyOtp(mobile, otp, purpose, deviceId, deviceName, platform);
+    const cleanOtp = String(otp || '').trim();
+    if (!/^\d{4}$/.test(cleanOtp)) {
+      return res.status(400).json({ error: 'OTP must be exactly 4 numeric digits', code: 'INVALID_OTP_FORMAT' });
+    }
+    const result = await authService.verifyOtp(mobile, cleanOtp, purpose, deviceId, deviceName, platform);
     res.json(result);
   } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
     next(err);
   }
 });
@@ -76,7 +103,8 @@ router.post('/mpin/verify', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
+    console.error('[MPIN VERIFY ERROR]', err);
+    return res.status(500).json({ error: 'Unable to connect right now. Please try again.' });
   }
 });
 

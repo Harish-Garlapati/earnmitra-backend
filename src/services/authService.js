@@ -23,7 +23,7 @@ function normalizeIndianMobile(value) {
 }
 
 function normalizePurpose(value) {
-  const aliases = { register: 'signup', registration: 'signup', mpin_reset: 'pin_reset' };
+  const aliases = { register: 'signup', registration: 'signup', mpin_reset: 'pin_reset', forgot_mpin: 'pin_reset' };
   const purpose = aliases[String(value || '').trim().toLowerCase()] || String(value || '').trim().toLowerCase();
   if (!OTP_PURPOSES.has(purpose)) {
     const err = new Error('Unsupported OTP purpose');
@@ -55,9 +55,15 @@ class AuthService {
       throw err;
     }
 
-    const otp = String(crypto.randomInt(100000, 1000000));
+    const otp = String(crypto.randomInt(1000, 10000));
     const otpHash = await bcrypt.hash(otp, 8);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes (600 seconds) matching DLT template
+
+    // Invalidate any unconsumed previous OTPs for this mobile & purpose
+    await query(
+      'UPDATE otp_sessions SET is_consumed = 1 WHERE mobile = ? AND purpose = ? AND is_consumed = 0',
+      [cleanMobile, cleanPurpose]
+    );
 
     const [inserted] = await query(
       `INSERT INTO otp_sessions (mobile, otp_hash, purpose, expires_at, attempt_count, is_consumed)
@@ -97,6 +103,67 @@ class AuthService {
     return response;
   }
 
+  async initiatePartnerSignup(data) {
+    const { fullName, name, mobile, phone, email, pincode, place, city, district, state } = data;
+    const resolvedName = (fullName || name || '').trim();
+    const cleanMobile = normalizeIndianMobile(mobile || phone);
+    const cleanPincode = String(pincode || '').trim();
+    const cleanCity = (place || city || district || '').trim();
+    const cleanDistrict = (district || cleanCity || '').trim();
+    const cleanState = (state || 'Telangana').trim();
+    const cleanEmail = email ? String(email).trim().toLowerCase() : null;
+
+    if (!resolvedName || resolvedName.length < 2) {
+      const err = new Error('Please enter your full name (minimum 2 characters)');
+      err.status = 400;
+      throw err;
+    }
+
+    if (!cleanPincode || !/^\d{6}$/.test(cleanPincode)) {
+      const err = new Error('Please enter a valid 6-digit PIN code');
+      err.status = 400;
+      throw err;
+    }
+
+    if (!cleanCity || !cleanState) {
+      const err = new Error('Place and state are required. Please verify your PIN code.');
+      err.status = 400;
+      throw err;
+    }
+
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      const err = new Error('Please enter a valid email address');
+      err.status = 400;
+      throw err;
+    }
+
+    // Check if partner already exists
+    const existing = await partnerRepo.findByMobile(cleanMobile);
+    if (existing) {
+      const err = new Error('An account with this mobile number already exists. Please log in.');
+      err.status = 409;
+      err.code = 'ACCOUNT_EXISTS';
+      throw err;
+    }
+
+    // Upsert to pending_registrations with 10-minute expiry
+    await query('DELETE FROM pending_registrations WHERE mobile = ?', [cleanMobile]);
+    await query(
+      `INSERT INTO pending_registrations (mobile, full_name, email, pincode, city, state, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))`,
+      [cleanMobile, resolvedName, cleanEmail, cleanPincode, cleanCity, cleanState]
+    );
+
+    // Send OTP with purpose 'signup'
+    const otpResult = await this.sendOtp(cleanMobile, 'signup');
+    return {
+      success: true,
+      mobile: cleanMobile,
+      message: 'OTP sent successfully for registration',
+      ...otpResult
+    };
+  }
+
   async verifyOtp(mobile, otp, purpose = 'login', deviceId = null, deviceName = null, platform = null) {
     const cleanMobile = normalizeIndianMobile(mobile);
     const cleanPurpose = normalizePurpose(purpose);
@@ -105,6 +172,13 @@ class AuthService {
     if (!cleanMobile || !cleanOtp) {
       const err = new Error('Mobile and OTP are required');
       err.status = 400;
+      throw err;
+    }
+
+    if (!/^\d{4}$/.test(cleanOtp)) {
+      const err = new Error('OTP must be exactly 4 numeric digits');
+      err.status = 400;
+      err.code = 'INVALID_OTP_FORMAT';
       throw err;
     }
 
@@ -145,7 +219,61 @@ class AuthService {
     await query('UPDATE otp_sessions SET is_consumed = 1 WHERE id = ?', [session.id]);
 
     // Check if partner exists
-    const partner = await partnerRepo.findByMobile(cleanMobile);
+    let partner = await partnerRepo.findByMobile(cleanMobile);
+
+    if (!partner) {
+      // Check if we have a pending registration
+      const [pendings] = await query(
+        `SELECT * FROM pending_registrations WHERE mobile = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
+        [cleanMobile]
+      );
+
+      if (pendings && pendings.length > 0) {
+        const pending = pendings[0];
+        const partnerCode = await this.getNextPartnerCode();
+        partner = await partnerRepo.create({
+          partner_code: partnerCode,
+          full_name: pending.full_name,
+          mobile: cleanMobile,
+          email: pending.email || null,
+          partner_type: 'Individual',
+          city: pending.city || null,
+          district: pending.district || null,
+          state: pending.state || 'Telangana',
+          pincode: pending.pincode || null,
+          kyc_status: 'pending',
+          approval_status: 'active'
+        });
+
+        // Clean up pending registration
+        await query('DELETE FROM pending_registrations WHERE mobile = ?', [cleanMobile]);
+
+        const token = this.generateToken({
+          id: partner.id,
+          partnerCode: partner.partner_code,
+          role: 'partner',
+          mobile: partner.mobile
+        });
+
+        const devSession = await this.createDeviceSession(
+          partner.id,
+          deviceId,
+          deviceName || 'Mobile Device',
+          platform || 'android'
+        );
+
+        return {
+          success: true,
+          isNew: true,
+          token,
+          deviceId: devSession.deviceId,
+          deviceToken: devSession.deviceToken,
+          hasMpin: false,
+          partner: partnerService.formatPartner(partner),
+          message: 'Account created successfully! Please set up your 4-digit MPIN.'
+        };
+      }
+    }
 
     if (partner) {
       const token = this.generateToken({
@@ -266,8 +394,8 @@ class AuthService {
     const cleanOtp = String(payload.otp || '').trim();
     const password = String(payload.newPassword || '');
     const confirmPassword = String(payload.confirmPassword || '');
-    if (!cleanMobile || !/^\d{6}$/.test(cleanOtp)) {
-      const err = new Error('Valid mobile number and 6-digit OTP are required'); err.status = 400; throw err;
+    if (!cleanMobile || !/^\d{4,6}$/.test(cleanOtp)) {
+      const err = new Error('Valid mobile number and OTP are required'); err.status = 400; throw err;
     }
     if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
       const err = new Error('Password must be at least 8 characters and include uppercase, lowercase and a number'); err.status = 400; throw err;
@@ -356,10 +484,14 @@ class AuthService {
       throw err;
     }
 
-    if (!password || password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
-      const err = new Error('Password must be at least 8 characters and include uppercase, lowercase and a number');
-      err.status = 400;
-      throw err;
+    let passwordHash = null;
+    if (password) {
+      if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+        const err = new Error('Password must be at least 8 characters and include uppercase, lowercase and a number');
+        err.status = 400;
+        throw err;
+      }
+      passwordHash = await bcrypt.hash(password, 10);
     }
 
     // Check existing
@@ -371,14 +503,13 @@ class AuthService {
     }
 
     const partnerCode = await this.getNextPartnerCode();
-    const passwordHash = await bcrypt.hash(password, 10);
 
     const insertSql = `
       INSERT INTO partners (
         partner_code, full_name, mobile, email, partner_type,
-        business_name, city, district, state, pan, password_hash,
+        business_name, city, district, state, pincode, pan, password_hash,
         role, is_active, kyc_status, approval_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'partner', 1, 'pending', 'active')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'partner', 1, 'pending', 'active')
     `;
 
     const [result] = await query(insertSql, [
@@ -391,6 +522,7 @@ class AuthService {
       city || null,
       district || null,
       state || 'Telangana',
+      payload.pincode || null,
       pan || null,
       passwordHash
     ]);
@@ -698,6 +830,13 @@ class AuthService {
     const cleanOtp = String(otp || '').trim();
     const cleanNewMpin = String(newMpin || '').trim();
     const cleanConfirm = String(confirmMpin || '').trim();
+
+    if (!cleanOtp || !/^\d{4}$/.test(cleanOtp)) {
+      const err = new Error('OTP must be exactly 4 numeric digits');
+      err.status = 400;
+      err.code = 'INVALID_OTP_FORMAT';
+      throw err;
+    }
 
     if (!cleanNewMpin || !/^\d{4}$/.test(cleanNewMpin)) {
       const err = new Error('PIN must be exactly 4 numeric digits');

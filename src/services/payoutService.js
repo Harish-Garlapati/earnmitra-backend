@@ -35,7 +35,7 @@ class PayoutService {
     };
   }
 
-  async requestPayout(amount, bank, partnerIdOrCode = null) {
+  async requestPayout(amount, bank, partnerIdOrCode = null, sourceBalance = 'any') {
     let partner = null;
     if (typeof partnerIdOrCode === 'number' || /^\d+$/.test(String(partnerIdOrCode))) {
       partner = await partnerRepo.findById(Number(partnerIdOrCode));
@@ -64,24 +64,28 @@ class PayoutService {
 
     const walletService = require('./walletService');
     const wallet = await walletService.getWallet(partner.id);
-    if (amt > wallet.earnedBalance) {
-      const err = new Error('Requested payout amount exceeds available balance (withdrawable earned balance)');
+    if (sourceBalance === 'wallet_money' && amt > wallet.rechargeBalance) {
+      const err = new Error('Requested payout exceeds available Wallet Money balance');
+      err.status = 400;
+      throw err;
+    }
+    if (sourceBalance === 'earnings' && amt > wallet.earnedBalance) {
+      const err = new Error('Requested payout exceeds available Earnings balance');
+      err.status = 400;
+      throw err;
+    }
+    if (amt > wallet.balance) {
+      const err = new Error('Requested payout amount exceeds available balance (total withdrawable balance)');
       err.status = 400;
       throw err;
     }
 
-    const earnings = await payoutRepo.getEarningsSummary(partner.id);
-    if (amt > earnings.available) {
-      const err = new Error('amount exceeds available balance');
-      err.status = 400;
-      throw err;
-    }
-
-    const payout = await payoutRepo.createPayoutRequest(partner.id, amt, bank);
+    const payout = await payoutRepo.createPayoutRequest(partner.id, amt, bank, sourceBalance);
     const updatedEarnings = await payoutRepo.getEarningsSummary(partner.id);
 
     return {
       requested: amt,
+      sourceBalance,
       bank: bank || partner.bank_name || 'Registered Bank Account',
       status: 'REQUESTED',
       referenceNumber: payout.referenceNumber,

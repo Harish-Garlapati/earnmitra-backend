@@ -18,8 +18,8 @@ router.get('/', authenticate, async (req, res, next) => {
 router.post('/', authenticate, async (req, res, next) => {
   try {
     const partnerId = req.user.partnerId;
-    const { amount, bank } = req.body;
-    const result = await payoutService.requestPayout(amount, bank, partnerId);
+    const { amount, bank, sourceBalance } = req.body;
+    const result = await payoutService.requestPayout(amount, bank, partnerId, sourceBalance);
     res.status(201).json(result);
   } catch (err) {
     if (err.status) {

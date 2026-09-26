@@ -46,7 +46,8 @@ router.get(['/me/dashboard', '/current/dashboard'], authenticate, async (req, re
     const partner = await partnerService.getCurrentPartner(identifier);
     const summary = await partnerService.getSummary(identifier);
     const partnerId = partner ? partner.dbId : undefined;
-    const allLeads = await leadService.listLeads({ partnerId });
+    const { search, q } = req.query;
+    const allLeads = await leadService.listLeads({ partnerId, search: search || q });
     res.json({
       partner,
       earnings: summary.earnings,

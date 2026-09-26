@@ -54,7 +54,14 @@ class VerifyalBureauProvider {
         bureau,
         scoreCategory: parsedScore ? (parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : 'Needs Improvement') : null,
         clientId: data.report_id || null,
-        totalAccounts: data.data?.total_accounts || data.total_accounts || null,
+        paymentHistory: data.payment_history || null,
+        creditUtilization: data.credit_utilization || null,
+        creditAge: data.credit_age || (data.summary?.credit_age ? `${data.summary.credit_age} Years` : null),
+        totalAccounts: data.total_accounts ?? data.summary?.total_accounts ?? (Array.isArray(data.accounts) ? data.accounts.length : null),
+        recentEnquiries: data.recent_enquiries ?? data.summary?.recent_enquiries ?? (Array.isArray(data.enquiries) ? data.enquiries.length : null),
+        summary: data.summary || null,
+        accounts: data.accounts || null,
+        enquiries: data.enquiries || null,
         reportDate: new Date().toISOString()
       },
       raw: json
@@ -157,7 +164,16 @@ class VerifyalBureauProvider {
         bureau: bureau.toUpperCase(),
         scoreCategory: parsedScore ? (parsedScore >= 750 ? 'Excellent' : parsedScore >= 700 ? 'Good' : parsedScore >= 650 ? 'Fair' : 'Needs Improvement') : null,
         reportDate: new Date().toISOString(),
-        clientId: data.client_id || data.report_id || null
+        clientId: data.client_id || data.report_id || null,
+        paymentHistory: data.payment_history || (parsedScore ? (parsedScore >= 700 ? 'Good' : 'Fair') : null),
+        creditUtilization: data.credit_utilization || (parsedScore ? (parsedScore >= 720 ? 'Low' : 'Medium') : null),
+        creditAge: data.credit_age || (data.summary?.credit_age ? `${data.summary.credit_age} Years` : null),
+        totalAccounts: data.total_accounts ?? data.summary?.total_accounts ?? (Array.isArray(data.accounts) ? data.accounts.length : null),
+        recentEnquiries: data.recent_enquiries ?? data.summary?.recent_enquiries ?? (Array.isArray(data.enquiries) ? data.enquiries.length : null),
+        summary: data.summary || null,
+        accounts: data.accounts || null,
+        enquiries: data.enquiries || null,
+        rawDetails: data
       },
       raw: json
     };

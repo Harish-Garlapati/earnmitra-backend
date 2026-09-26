@@ -126,13 +126,17 @@ async function runTests() {
     // 4. Partner A submits Lead A
     console.log('\n─── Step 4: Partner A submits Lead A ───');
     const leadA = await request('/api/leads', { method: 'POST', headers: partnerAHeaders }, {
-      applicantName: 'Customer Alpha',
+      businessName: 'Alpha Enterprises',
       mobile: '9800000001',
-      city: 'Hyderabad',
+      entityType: 'Proprietorship',
+      pincode: '500081',
+      place: 'Hyderabad',
+      state: 'Telangana',
       loanType: 'Business Loan',
       loanAmount: 500000,
       productCategory: 'Loans',
-      businessName: 'Alpha Enterprises'
+      consent: true,
+      mode: 'referral'
     });
     assert('Lead A created', leadA.status === 201 || leadA.status === 200, `Status: ${leadA.status}`);
     const leadAId = leadA.body?.dbId || leadA.body?.id;
@@ -144,10 +148,14 @@ async function runTests() {
     const leadB = await request('/api/leads', { method: 'POST', headers: partnerBHeaders }, {
       applicantName: 'Customer Beta',
       mobile: '9800000002',
-      city: 'Bangalore',
+      pincode: '560001',
+      place: 'Bangalore',
+      state: 'Karnataka',
       loanType: 'Personal Loan',
       loanAmount: 300000,
-      productCategory: 'Loans'
+      productCategory: 'Loans',
+      consent: true,
+      mode: 'referral'
     });
     assert('Lead B created', leadB.status === 201 || leadB.status === 200, `Status: ${leadB.status}`);
     const leadBId = leadB.body?.dbId || leadB.body?.id;
