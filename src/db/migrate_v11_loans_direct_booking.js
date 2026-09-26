@@ -128,27 +128,34 @@ async function migrateV11() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
-    console.log(`[migrate_v11] Seeding verified lender contacts...`);
-    const initialContacts = [
-      { lenderCode: 'HDFC', dept: 'Partner Support Desk', person: 'Rohit Sharma', desig: 'Relationship Manager', phone: '1800 267 6161', email: 'leads@hdfcbank.com' },
-      { lenderCode: 'ICICI', dept: 'Retail Loan Desk', person: 'Neha Verma', desig: 'Key Account Manager', phone: '1800 108 2424', email: 'directsales@icicibank.com' },
-      { lenderCode: 'AXIS', dept: 'Personal Loan Support', person: 'Pooja Reddy', desig: 'Loan Relationship Officer', phone: '1860 419 5555', email: 'loans@axisbank.com' },
-      { lenderCode: 'SBI', dept: 'SME & Retail Loans Desk', person: 'Amit Kumar', desig: 'Business Development Manager', phone: '1800 1234', email: 'customercare@sbi.co.in' },
-      { lenderCode: 'BAJAJ', dept: 'Partner Business Desk', person: 'Vikram Singh', desig: 'Area Partner Lead', phone: '086980 10101', email: 'wecare@bajajfinserv.in' },
-      { lenderCode: 'TATA', dept: 'Retail Finance Desk', person: 'Kavita Nair', desig: 'Regional Desk Officer', phone: '1860 267 6060', email: 'contactus@tatacapital.com' },
-      { lenderCode: 'FEDERAL_BANK', dept: 'Partner Alliances', person: 'George Thomas', desig: 'Alliances Manager', phone: '1800 425 1199', email: 'support@federalbank.co.in' }
-    ];
+    if (process.env.NODE_ENV === 'production') {
+      console.log(
+        '[migrate_v11] PRODUCTION: skipping development lender contact seed data. ' +
+        'Production contacts require approved commercial data.'
+      );
+    } else {
+      console.log(`[migrate_v11] Seeding verified lender contacts...`);
+      const initialContacts = [
+        { lenderCode: 'HDFC', dept: 'Partner Support Desk', person: 'Rohit Sharma', desig: 'Relationship Manager', phone: '1800 267 6161', email: 'leads@hdfcbank.com' },
+        { lenderCode: 'ICICI', dept: 'Retail Loan Desk', person: 'Neha Verma', desig: 'Key Account Manager', phone: '1800 108 2424', email: 'directsales@icicibank.com' },
+        { lenderCode: 'AXIS', dept: 'Personal Loan Support', person: 'Pooja Reddy', desig: 'Loan Relationship Officer', phone: '1860 419 5555', email: 'loans@axisbank.com' },
+        { lenderCode: 'SBI', dept: 'SME & Retail Loans Desk', person: 'Amit Kumar', desig: 'Business Development Manager', phone: '1800 1234', email: 'customercare@sbi.co.in' },
+        { lenderCode: 'BAJAJ', dept: 'Partner Business Desk', person: 'Vikram Singh', desig: 'Area Partner Lead', phone: '086980 10101', email: 'wecare@bajajfinserv.in' },
+        { lenderCode: 'TATA', dept: 'Retail Finance Desk', person: 'Kavita Nair', desig: 'Regional Desk Officer', phone: '1860 267 6060', email: 'contactus@tatacapital.com' },
+        { lenderCode: 'FEDERAL_BANK', dept: 'Partner Alliances', person: 'George Thomas', desig: 'Alliances Manager', phone: '1800 425 1199', email: 'support@federalbank.co.in' }
+      ];
 
-    for (const c of initialContacts) {
-      const [lenders] = await conn.query(`SELECT id FROM lenders WHERE code = ? LIMIT 1`, [c.lenderCode]);
-      if (lenders.length > 0) {
-        const lid = lenders[0].id;
-        const [existing] = await conn.query(`SELECT id FROM lender_contacts WHERE lender_id = ? LIMIT 1`, [lid]);
-        if (existing.length === 0) {
-          await conn.query(
-            `INSERT INTO lender_contacts (lender_id, department, contact_person, designation, phone, email) VALUES (?, ?, ?, ?, ?, ?)`,
-            [lid, c.dept, c.person, c.desig, c.phone, c.email]
-          );
+      for (const c of initialContacts) {
+        const [lenders] = await conn.query(`SELECT id FROM lenders WHERE code = ? LIMIT 1`, [c.lenderCode]);
+        if (lenders.length > 0) {
+          const lid = lenders[0].id;
+          const [existing] = await conn.query(`SELECT id FROM lender_contacts WHERE lender_id = ? LIMIT 1`, [lid]);
+          if (existing.length === 0) {
+            await conn.query(
+              `INSERT INTO lender_contacts (lender_id, department, contact_person, designation, phone, email) VALUES (?, ?, ?, ?, ?, ?)`,
+              [lid, c.dept, c.person, c.desig, c.phone, c.email]
+            );
+          }
         }
       }
     }
